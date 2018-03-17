@@ -22,23 +22,33 @@ uint64_t currentTimestamp() {
   return ((uint64_t) hi << 32) | lo;
 }
 
-struct StringSplit : public DoFn<string, KV<string, long>> {
+struct StringSplit : public DoFn<string, TS<KV<string, long>>> {
   void processElement(ProcessContext processContext) override {
     string line = std::move(processContext.element());
     istringstream iss(line);
     string token;
     while(iss >> token) {
       uint64_t ts = currentTimestamp();
-      processContext.outputWithTimestamp(std::move(token), ts);
+      processContext.output(make_kv(std::move(token), 1LL), ts);
     }
   }
 };
 
-struct WordCountFormat : public DoFn<KV<string, long>, string> {
+template <typename T>
+struct AssignTimestamp : public DoFn<T, TS<T>> {
   void processElement(ProcessContext processContext) override {
-    KV<string, long> item = std::move(processContext.element());
-    item.key.append(ltoa(item.value));
-    processContext.output(std::move(item.key));
+    T elem = std::move(processContext.element());
+    uint64_t ts = currentTimestamp();
+    processContext.output(make_ts(std::move(elem), ts));
+  }
+};
+
+struct WordCountFormat : public DoFn<WIN<KV<string, long>>, string> {
+  void processElement(ProcessContext processContext) override {
+    WIN<KV<string, long>> item = std::move(processContext.element());
+    ostringstream oss;
+    oss << item.id << " " << item.e.key << " " << item.e.value << endl;
+    processContext.output(std::move(oss.str()));
   }
 };
 
@@ -65,10 +75,10 @@ struct TopkCombineFn : public CombineFn<KV<string, long>, TopkCombineFnAccumulat
     return new TopkCombineFnAccumulater;
   }
 
-  void addInput(TopkCombineFnAccumulater* rhs, const KV<string, long>& rhs) override {
-    rhs->max_q.push(rhs);
-    if (rhs->max_q.size() > K) {
-      rhs->max_q.pop();
+  void addInput(TopkCombineFnAccumulater* lhs, const KV<string, long>& rhs) override {
+    lhs->max_q.push(rhs);
+    if (lhs->max_q.size() > K) {
+      lhs->max_q.pop();
     }
   }
 
@@ -85,12 +95,30 @@ struct TopkCombineFn : public CombineFn<KV<string, long>, TopkCombineFnAccumulat
     return result_acc;
   }
 
-  std::list<KV<string, long>> extractOutput(TopkCombineFnAccumulater* accumulator) override {
+  string extractOutput(TopkCombineFnAccumulater* accumulator) override {
     ostringstream oss;
     for(const KV<string, long>& kv : accumulator->max_q) {
       oss << kv.key << " " << kv.value << endl;
     }
     return oss.str();
+  }
+};
+
+template <typename T>
+struct SumFn : public CombineFn<T, T, T> {
+  SumFn() {}
+  T* createAccumulator() override {
+    return new T;
+  }
+  void addInput(T* lhs, const T& rhs) override {
+    (*lhs) += rhs;
+  }
+  T* mergeAccumulators(const std::list<T*>& accumulators) override {
+    T* result_acc = createAccumulator();
+    for(T* acc : accumulators) {
+      (*result_acc) += (*acc);
+    }
+    return result_acc;
   }
 };
 
@@ -103,15 +131,19 @@ int main(int argc, char* argv[]) {
   int   topK             = atoi(argv[4]);
 
   Pipeline* p = Pipeline.create();
-  WithDevice(Device::CPU().node(ALL).socket(ALL).cpu_per_socket(2));
+  // scatter for better IO performance
+  WithDevice(Device::CPU()->all_nodes()->all_sockets()->cpu_per_socket(2));
   PCollection<string>* input = p->apply(TextIO::read()->from(text_path));
   PCollection<KV<string, long>>* words = input->apply(ParDo::of(StringSplit()));
-  PCollection<KV<string, long>>* windowed_words = words->apply(Window::into(FixedWindows::of(CPU_GHZ * 1e9)));
-
-  PCollection<KV<string, long>>* word_counts = windowed_words->apply(Count::perKey());
-  PCollection<string>* output = word_counts->apply(ParDo::of(WordCountFormat()));
+  PCollection<TS<KV<string, long>>>* ts_words = words->apply(ParDo::of(AssignTimestamp<KV<string, long>>()));
+  PCollection<WN<KV<string, long>>>* windowed_words = ts_words->apply(Window::into(FixedWindows::of(CPU_GHZ * 1e9)));
+  // try to use scatter
+  WithDevice(Device::CPU()->all_nodes()->all_sockets()->cpu_per_socket(2));
+  PCollection<WN<KV<string, long>>>* windowed_word_counts = windowed_words->apply(WindowedCombine::perKey());
+  PCollection<string>* output = word_counts->apply(ParDo::of(WinWordCountFormat()));
   output->apply(TextIO::write()->to(output_path_wordcount));
 
+  WithDevice(Device::CPU()->all_nodes()->all_sockets()->cpu_per_socket(2));
   PCollection<string>* topk_word_counts_output = word_counts->apply(Combine::globally(TopkCombineFn(topK)));
   output->apply(TextIO::write()->to(output_path_topk));
   p->run();
