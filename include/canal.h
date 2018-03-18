@@ -7,6 +7,8 @@
 #include <thread>
 
 using Thread = std::thread;
+
+// TODO: Channel mechanis,
 using Channel = ...;
 using InputChannel = ...;
 using OutputChannel = ...;
@@ -25,6 +27,7 @@ struct TS {
 
 template <typename T>
 struct WIN {
+  WIN(T&& e, uint64_t id) : e(std::move(e)), id(id) {}
   uint64_t id;
   T e;
 };
@@ -86,14 +89,16 @@ struct PTInstance {
 struct PTransform {
   string     name;
   CPUDevice* device;
-  PTransform(string transform_name) : name(transform_name), device(g_curr_device) {}
+  PTransform() : name(""), device(g_curr_device) {}
+  PTransform* set_name(const string& name) { this->name = name; return this; }
   string display_name() { return name + "@" + type_name(); }
 
   virtual string type_name()=0;
   virtual bool is_elementwise()=0; // hint for scheduler
   virtual bool is_shuffle()=0; // hint for shceduler
   virtual PTInstance* create_instance(int instance_id)=0;
-  virtual bool progress(const InputChannelList& in, const OutputChannelList& out, void* state)=0; // return false for completion
+  virtual void execute(const InputChannelList& in, const OutputChannelList& out, void* state)=0; // execute this instance until it has finished
+  // virtual bool progress(const InputChannelList& in, const OutputChannelList& out, void* state)=0; // return false to report completion
 };
 
 template <typename InputT, typename OutputT>
@@ -109,6 +114,7 @@ struct CollectionOutputEntry
 
   CollectionOutputEntry() : target_collection(NULL), via_transform(NULL) {}
 };
+
 using CollectionOutputEntryList = std::vector<CollectionOutputEntry>;
 
 template <typename T>
@@ -178,72 +184,69 @@ struct DistributedPipelineScheduler {
     int id; // unique id in a stage for this task
     int bind_socket_id; // socket id to bound to
     bool launched;
-    Thread worker_thread;
+    std::vector<Thread> worker_thread_list; // one thread for each task transform
     Task(int task_id) : id(task_id), bind_socket_id(-1), launched(false) {}
     int bind_socket(int bind_socket_id) {
       this->bind_socket_id = bind_socket_id;
     }
-    int num_transforms();
     InputChannelList stage_input_channels; // from last stage
     std::vector<LocalOutputChannel*> intermediate_output_channels; // intra-stage
     std::vector<LocalInputChannel*>  intermediate_input_channels; // intra-stage
     OutputChannelList stage_output_channels; // to next stage
     std::vector<PTInstance*> transform_instance_list;
 
+    int num_transforms() { return transform_instance_list.size(); }
+
     void launch() {
       assert(!launched);
       launched = true;
       assert(transform_instance_list.size() > 0);
-      worker_thread = std::move(Thread([this](){
-        if (bind_socket_id > 0) {
-          numa_run_on_node(bind_socket_id);
-        }
-        InputChannelList tmp_icl;
-        OutputChannelList tmp_ocl;
-        tmp_icl.push_back(NULL);
-        tmp_ocl.push_back(NULL);
-        while (true) {
-          int num_completion = 0;
-          if (transform_instance_list.size() == 1) {
-            PTInstance* pti = transform_instance_list[0];
+
+      if (transform_instance_list.size() == 1) {
+        worker_thread_list.push_back(std::move(Thread([this](){
+          if (bind_socket_id > 0) {
+            numa_run_on_node(bind_socket_id);
+          }
+          PTInstance* instance = transform_instance_list[0];
+          PTransform* ptransform = instance->ptransform;
+          void* state = instance->state;
+          ptransform->execute(stage_input_channels, stage_output_channels, state);
+        })));
+      } else {
+        for(int i=0; i<transform_instance_list.size(); i++) {
+          worker_thread_list.push_back(std::move(Thread([this, i](){
+            if (bind_socket_id > 0) {
+              numa_run_on_node(bind_socket_id);
+            }
+            PTInstance* pti = transform_instance_list[i];
             PTransform* pt  = pti->ptransform;
             void* state     = pti->state;
-            bool success = pt->progress(stage_input_channels, stage_output_channels, state);
-            if (!success) {
-              num_completion++;
+            InputChannelList  tmp_icl;
+            OutputChannelList tmp_ocl;
+            tmp_icl.push_back(NULL);
+            tmp_ocl.push_back(NULL);
+            if (i == 0) {
+              tmp_ocl[0] = intermediate_output_channels[i];
+              pt->execute(stage_input_channels, tmp_ocl, state);
+            } else if (i == (transform_instance_list.size() - 1)) {
+              tmp_icl[0] = intermediate_input_channels[i-1];
+              pt->execute(tmp_icl, stage_output_channels, state);
+            } else {
+              tmp_ocl[0] = intermediate_output_channels[i];
+              tmp_icl[0] = intermediate_input_channels[i-1];
+              pt->execute(tmp_icl, tmp_ocl, state);
             }
-          } else {
-            for(int i=0; i<transform_instance_list.size(); i++) {
-              PTInstance* pti = transform_instance_list[i];
-              PTransform* pt  = pti->ptransform;
-              voud* state     = pti->state;
-              bool success;
-              if (i == 0) {
-                tmp_ocl[0] = intermediate_output_channels[i];
-                success = pt->progress(stage_input_channels, tmp_ocl, state);
-              } else if (i == transform_instance_list.size() - 1) {
-                tmp_icl[0] = intermediate_input_channels[i-1];
-                success = pt->progress(tmp_icl, stage_output_channels, state);
-              } else {
-                tmp_icl[0] = intermediate_input_channels[i-1];
-                tmp_ocl[0] = intermediate_output_channels[i];
-                success = pt->progress(tmp_icl, tmp_ocl, state);
-              }
-              if (!success) {
-                num_completion++;
-              }
-            }
-          }
-          if (num_completion == transform_instance_list.size()) {
-            break; // termination when all transform reported completion
-          }
+          })));
         }
-      }));
+      }
     }
 
     void join() {
       assert(launched);
-      worker_thread.join();
+      for (Thread& worker_thread : worker_thread_list) {
+        worker_thread.join();
+      }
+      launched = false;
     }
   };
 
