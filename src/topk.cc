@@ -36,7 +36,7 @@ struct StringSplit : public DoFn<string, TS<KV<string, long>>> {
 
 template <typename T>
 struct AssignTimestamp : public DoFn<T, TS<T>> {
-  void processElement(ProcessContext processContext) override {
+  void processElement(ProcessContext& processContext) override {
     T elem = std::move(processContext.element());
     uint64_t ts = currentTimestamp();
     processContext.output(make_ts(std::move(elem), ts));
@@ -44,7 +44,7 @@ struct AssignTimestamp : public DoFn<T, TS<T>> {
 };
 
 struct WordCountFormat : public DoFn<WIN<KV<string, long>>, string> {
-  void processElement(ProcessContext processContext) override {
+  void processElement(ProcessContext& processContext) override {
     WIN<KV<string, long>> item = std::move(processContext.element());
     ostringstream oss;
     oss << item.id << " " << item.e.key << " " << item.e.value << endl;
@@ -105,10 +105,13 @@ struct TopkCombineFn : public CombineFn<KV<string, long>, TopkCombineFnAccumulat
 };
 
 template <typename T>
-struct SumFn : public CombineFn<T, T, T> {
+struct SumFn : public CombineFn<T, typename T zero_value, T, T> {
   SumFn() {}
   T* createAccumulator() override {
-    return new T;
+    return new T(zero_value);
+  }
+  void resetAccumulator(T* acc) {
+    (*acc) = zero_value;
   }
   void addInput(T* lhs, const T& rhs) override {
     (*lhs) += rhs;
@@ -132,18 +135,17 @@ int main(int argc, char* argv[]) {
 
   Pipeline* p = Pipeline.create();
   // scatter for better IO performance
-  WithDevice(Device::CPU()->all_nodes()->all_sockets()->cpu_per_socket(2));
-  PCollection<string>* input = p->apply(TextIO::read()->from(text_path));
-  PCollection<KV<string, long>>* words = input->apply(ParDo::of(StringSplit()));
-  PCollection<TS<KV<string, long>>>* ts_words = words->apply(ParDo::of(AssignTimestamp<KV<string, long>>()));
-  PCollection<WN<KV<string, long>>>* windowed_words = ts_words->apply(Window::into(FixedWindows::of(CPU_GHZ * 1e9)));
-  // try to use scatter
-  WithDevice(Device::CPU()->all_nodes()->all_sockets()->cpu_per_socket(2));
+  WithDevice(Device::CPU()->all_nodes()->all_sockets()->task_per_socket(2));
+  PCollection<string>* input = p->apply(TextIO::read()->from(text_path)->set_name("read from file"));
+  PCollection<KV<string, long>>* words = input->apply(ParDo::of(StringSplit())->set_name("split lines"));
+  PCollection<TS<KV<string, long>>>* ts_words = words->apply(ParDo::of(AssignTimestamp<KV<string, long>>())->set_name("assign timestamp"));
+  PCollection<WN<KV<string, long>>>* windowed_words = Window::FixedWindows::assign(ts_words, CPU_GHZ * 1e9); // ts_words->apply(Window::FixedWindows::of(CPU_GHZ * 1e9));
+  WithDevice(Device::CPU()->all_nodes()->all_sockets()->task_per_socket(2));
   PCollection<WN<KV<string, long>>>* windowed_word_counts = windowed_words->apply(WindowedCombine::perKey());
   PCollection<string>* output = word_counts->apply(ParDo::of(WinWordCountFormat()));
   output->apply(TextIO::write()->to(output_path_wordcount));
-
-  WithDevice(Device::CPU()->all_nodes()->all_sockets()->cpu_per_socket(2));
+  
+  WithDevice(Device::CPU()->all_nodes()->all_sockets()->task_per_socket(2));
   PCollection<string>* topk_word_counts_output = word_counts->apply(Combine::globally(TopkCombineFn(topK)));
   output->apply(TextIO::write()->to(output_path_topk));
   p->run();

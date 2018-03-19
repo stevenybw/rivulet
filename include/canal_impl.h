@@ -1,3 +1,12 @@
+struct Serdes
+{
+  template <typename T>
+  static T stream_deserialize(InputChannel* in) {assert(false);} // TODO
+
+  template <typename T>
+  static void stream_serialize(OutputChannel* out, T& elem) {assert(false);} // TODO
+};
+
 template <typename InputT, typename OutputT>
 struct DoFn {
   typedef InputT InputType;
@@ -10,8 +19,8 @@ struct DoFn {
     
     InputT& element() { return _element; }
 
-    void output(OutputT& output_element) {
-      Sedes::stream_serialize(out, output_element);
+    void output(OutputT&& output_element) {
+      Serdes::stream_serialize(_output_channel, output_element);
     }
   };
   virtual void processElement(ProcessContext& processContext)=0;
@@ -26,6 +35,8 @@ struct ParDo {
 
     DoFnType do_fn;
     ParDoTransform(const DoFnType& do_fn) : do_fn(do_fn) {}
+
+    ParDoTransform<DoFnType>* set_name(const string& name) { this->name = name; return this; }
 
     string type_name() override { return "ParDoTransform"; }
     bool is_elementwise() override { return true; }
@@ -44,16 +55,16 @@ struct ParDo {
       InputChannel* in = inputs[0];
       OutputChannel* out = outputs[0];
       while (!in->eos()) {
-        InputT in_element = Sedes::stream_deserialize<InputT>(in);
-        ProcessContext pc(in_element, out);
+        InputT in_element = Serdes::stream_deserialize<InputT>(in);
+        typename DoFnType::ProcessContext pc(in_element, out);
         do_fn.processElement(pc);
       }
     }
-  }
+  };
 
   template <typename DoFnType>
   static ParDoTransform<DoFnType>* of(const DoFnType& do_fn) {
-    return new ParDoTransform(do_fn);
+    return new ParDoTransform<DoFnType>(do_fn);
   }
 };
 
@@ -87,6 +98,11 @@ struct Shuffle
       }
     }
   };
+
+  template <typename T>
+  static PCollection<WN<T>>* byWindowId(PCollection<WN<T>>* pcollection) {
+    return pcollection->apply(new ShuffleByWindowIdTransform<T>());
+  }
 };
 
 struct TextIO {
@@ -107,6 +123,8 @@ struct TextIO {
       return this;
     }
 
+    ReadTransform* set_name(const string& name) { this->name = name; return this; }
+
     string type_name() override { return "ReadTransform"; }
     bool is_elementwise() override { return true; }
     bool is_shuffle() override { return false; }
@@ -114,7 +132,7 @@ struct TextIO {
     PTInstance* create_instance(int instance_id) override {
       State* state = new State(path + "." + std::to_string(instance_id));
       if (!(state->fin)) {
-        cerr << "failed to open file " << path << endl;
+        cerr << "failed to open file " << (path + "." + std::to_string(instance_id)) << endl;
         assert(false);
       }
       PTInstance* instance = new PTInstance;
@@ -125,54 +143,64 @@ struct TextIO {
     }
 
     void execute(const InputChannelList& inputs, const OutputChannelList& outputs, void* state) override {
-      InputChannel* in = inputs[0];
+      assert(inputs.size() == 0);
+      assert(outputs.size() == 1);
       OutputChannel* out = outputs[0];
       State* st = (State*) state;
       string line;
       std::ifstream& fin = st->fin;
       while (std::getline(fin, line)) {
-        while(!out->push(line.c_str(), line.size())) {
-          yield();
-        }
+        Serdes::stream_serialize(out, line);
       }
       assert(!fin);
       out->close();
     }
+  };
 
-    /*
-    bool progress(const InputChannelList& inputs, const OutputChannelList& outputs, void* state) override {
-      InputChannel* in  = inputs[0];
-      OutputChannel* out = outputs[0];
-      State*   st  = (State*) state;
-      string line;
-      std::ifstream& fin = st->fin;
-      if (st->last_line_valid) {
-        string& last_line = st->last_line;
-        bool ok = out->push(last_line.c_str(), last_line.size());
-        if (ok) {
-          st->last_line_valid = false;
-        } else {
-          return true;
-        }
+  struct WriteTransform : public TaggedPTransform<string, PCollectionOutput>
+  {
+    string write_path;
+    WriteTransform* to(const string& write_path) {
+      this->write_path = write_path;
+      return this;
+    }
+
+    WriteTransform* set_name(const string& name) { this->name = name; return this; }
+
+    string type_name() override { return "WriteTransform"; }
+    bool is_elementwise() override { return true; }
+    bool is_shuffle() override { return false; }
+
+    PTInstance* create_instance(int instance_id) override {
+      PTInstance* instance = new PTInstance;
+      instance->instance_id = instance_id;
+      instance->ptransform = this;
+      instance->state = NULL;
+      return instance;
+    }
+
+    void execute(const InputChannelList& inputs, const OutputChannelList& outputs, void* state) override {
+      assert(inputs.size() == 1);
+      assert(outputs.size() == 0);
+      InputChannel* in = inputs[0];
+      std::ofstream fout(write_path);
+      if (!fout) {
+        cerr << "failed to open file " << write_path << endl;
+        assert(false);
       }
-      while (std::getline(fin, line)) {
-        bool ok = out->push(line.c_str(), line.size());
-        if (!ok) {
-          st->last_line_valid = true;
-          st->last_line = std::move(line);
-          break;
-        }
+      while (!in->eos()) {
+        string in_element = Serdes::stream_deserialize<string>(in);
+        fout << in_element << endl;
       }
-      if (!fin) {
-        // EOF reached
-        out->close();
-        return false; // report completion
-      }
-    }*/
+    }
   };
 
   static ReadTransform* read() {
     return new ReadTransform;
+  }
+
+  static WriteTransform* write() {
+    return new WriteTransform;
   }
 };
 
@@ -203,17 +231,17 @@ struct Window
         InputChannel* in = inputs[0];
         OutputChannel* out = outputs[0];
         while (!in->eos()) {
-          KV<T> in_element = Sedes::stream_deserialize<KV<T>>(in);
+          TS<T> in_element = Serdes::stream_deserialize<TS<T>>(in);
           uint64_t ts = in_element.ts;
-          WN<T> out_element(std::move(in_element.e, ts / window_size));
-          Sedes::stream_serialize(out, out_element);
+          WN<T> out_element(std::move(in_element.e), ts / window_size);
+          Serdes::stream_serialize(out, out_element);
         }
       }
     };
 
     template <typename T>
     static PCollection<WN<T>>* assign(PCollection<TS<T>>* pcollection, uint64_t window_size) {
-      return pcollection->apply(FixedWindowsTransform<T>(window_size));
+      return pcollection->apply(new FixedWindowsTransform<T>(window_size));
     }
   };
 };
@@ -306,7 +334,7 @@ struct WindowedCombine
 
   template <typename CombineFnType>
   static PCollection<WN<typename CombineFnType::OutputType>>* globally(PCollection<WN<typename CombineFnType::InputType>>* pcollection, const CombineFnType& combine_fn) {
-    return pcollection->apply(WindowedCombineTransform<CombineFnType,typename CombineFnType::InputType,typename CombineFnType::OutputType>(combine_fn));
+    return pcollection->apply(new WindowedCombineTransform<CombineFnType,typename CombineFnType::InputType,typename CombineFnType::OutputType>(combine_fn));
   }
 };
 

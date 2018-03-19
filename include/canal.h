@@ -3,16 +3,56 @@
 #include <functional>
 #include <iostream>
 #include <list>
+#include <memory>
+#include <set>
 #include <string>
 #include <thread>
 
-using Thread = std::thread;
+#include <numa.h>
+#include <mpi.h>
 
-// TODO: Channel mechanis,
-using Channel = ...;
-using InputChannel = ...;
-using OutputChannel = ...;
-using string = std::string;
+using Thread = std::thread;
+//using string = std::string;
+
+using namespace std;
+
+struct InputChannel
+{
+  bool eos() {
+    assert(false); //TODO
+    return false;
+  };
+};
+
+struct OutputChannel
+{
+  void close() {
+    assert(false); //TODO
+  }
+};
+
+struct LocalInputChannel : public InputChannel
+{
+};
+
+struct LocalOutputChannel : public OutputChannel
+{
+};
+
+struct ChannelMgr 
+{
+  static InputChannel* create_input_channel(int from_rank, int from_lid) {
+    return NULL; //TODO
+  }
+  static OutputChannel* create_output_channel(int to_rank, int to_lid) {
+    return NULL; //TODO
+  }
+  static std::tuple<LocalOutputChannel*, LocalInputChannel*> create_local_channels() {
+    LocalOutputChannel* out = NULL;
+    LocalInputChannel* in = NULL;
+    return std::make_tuple(out, in); //TODO
+  }
+};
 
 using InputChannelList = std::vector<InputChannel*>;
 using OutputChannelList = std::vector<OutputChannel*>;
@@ -21,40 +61,40 @@ using OutputChannelList = std::vector<OutputChannel*>;
 
 template <typename T>
 struct TS {
-  uint64_t ts;
+  TS()=default;
+  TS(T&& e, uint64_t ts) : e(std::move(e)), ts(ts) {}
   T e;
+  uint64_t ts;
 };
 
 template <typename T>
-struct WIN {
-  WIN(T&& e, uint64_t id) : e(std::move(e)), id(id) {}
-  uint64_t id;
+struct WN {
+  WN()=default;
+  WN(T&& e, uint64_t id) : e(std::move(e)), id(id) {}
   T e;
+  uint64_t id;
 };
 
 struct WorkerDescriptor {
   int worker_rank;
   int worker_lid;
   int worker_socket_id;
-  int rank() { return worker_rank; }
-  int lid() { return worker_lid; }
-  int socket_id() { return worker_socket_id; }
+  int rank() const { return worker_rank; }
+  int lid() const { return worker_lid; }
+  bool has_socket_id() const { return worker_socket_id>=0; }
+  int socket_id() const { return worker_socket_id; }
 };
 
-struct Device {
-  CPUDevice* CPU() { return new CPUDevice; }
-};
-
-struct CPUDevice : Device {
+struct CPUDevice {
   std::set<int> node_set; // ranks to distributed to
   std::set<int> socket_set; // socket to distributed
-  int num_proc_per_socket;
+  int num_tasks_per_socket;
 
   CPUDevice* all_nodes() {
     int nprocs;
     MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
     for(int i=0; i<nprocs; i++) {
-      node_set.push_back(i);
+      node_set.insert(i);
     }
     return this;
   }
@@ -62,22 +102,29 @@ struct CPUDevice : Device {
   CPUDevice* all_sockets() {
     int num_sockets = numa_num_configured_nodes();
     for(int i=0; i<num_sockets; i++) {
-      socket_set.push_back(i);
+      socket_set.insert(i);
     }
     return this;
   }
 
-  CPUDevice* cpu_per_socket(int num_cpus) {
-    num_proc_per_socket = num_cpus;
+  CPUDevice* tasks_per_socket(int num_tasks_per_socket) {
+    this->num_tasks_per_socket = num_tasks_per_socket;
     return this;
   }
 };
 
-CPUDevice* g_curr_device;
+struct Device {
+  static CPUDevice* CPU() { return new CPUDevice; }
+};
+
+CPUDevice* g_curr_device = NULL;
 
 void WithDevice(CPUDevice* device) {
   g_curr_device = device;
 }
+
+struct PTransform;
+struct PCollectionBase;
 
 // A PTransform instance bound with a unique id and optionally a state
 struct PTInstance {
@@ -90,8 +137,7 @@ struct PTransform {
   string     name;
   CPUDevice* device;
   PTransform() : name(""), device(g_curr_device) {}
-  PTransform* set_name(const string& name) { this->name = name; return this; }
-  string display_name() { return name + "@" + type_name(); }
+  string display_name() { return name + " @ " + type_name(); }
 
   virtual string type_name()=0;
   virtual bool is_elementwise()=0; // hint for scheduler
@@ -107,22 +153,25 @@ struct TaggedPTransform : public PTransform {};
 struct PCollectionInput {};  // placeholder type for input of source
 struct PCollectionOutput {}; // placeholder type for output of sink
 
-struct CollectionOutputEntry 
+struct CollectionOutputEntry
 {
-  PCollection* target_collection;
-  PTransform*  via_transform;
+  PCollectionBase* target_collection;
+  PTransform*      via_transform;
 
   CollectionOutputEntry() : target_collection(NULL), via_transform(NULL) {}
 };
 
 using CollectionOutputEntryList = std::vector<CollectionOutputEntry>;
 
+struct PCollectionBase
+{
+  CollectionOutputEntryList outputs;
+};
+
 template <typename T>
-struct PCollection 
+struct PCollection : public PCollectionBase
 {
   PCollection() {}
-
-  CollectionOutputEntryList outputs;
 
   template <typename InputT, typename OutputT>
   PCollection<OutputT>* apply(TaggedPTransform<InputT, OutputT>* pt) {
@@ -138,17 +187,16 @@ struct PCollection
 // Scheduler fo a pipeline (assume a strait pipeline, no diverge), and support
 // distributed environment.
 struct DistributedPipelineScheduler {
-  // Stage: CollectionOutputEntries's via_transform
   struct Stage 
   {
     Stage() : device(NULL) {}
     // @TODO add move constructor
-    std::vector<CollectionOutputEntry> pt_list;
+    std::vector<PTransform*> ptransform_list;
     std::vector<WorkerDescriptor> workers;
     std::vector<WorkerDescriptor> local_workers;
     CPUDevice* device;
     void set_device(CPUDevice* device) {
-      assert(device == NULL);
+      assert(device != NULL);
       this->device = device;
       int rank, nprocs;
       MPI_Comm_rank(MPI_COMM_WORLD, &rank);
@@ -156,11 +204,11 @@ struct DistributedPipelineScheduler {
 
       const std::set<int>& node_set = device->node_set;
       const std::set<int>& socket_set = device->socket_set;
-      int num_proc_per_socket = device->num_proc_per_socket;
+      int num_tasks_per_socket = device->num_tasks_per_socket;
       for (int node_id : node_set) {
         int lid = 0;
         for (int socket_id : socket_set) {
-          for (int i=0; i<num_proc_per_socket; i++) {
+          for (int i=0; i<num_tasks_per_socket; i++) {
             WorkerDescriptor wd;
             wd.worker_rank = node_id;
             wd.worker_lid  = lid++;
@@ -173,21 +221,23 @@ struct DistributedPipelineScheduler {
         }
       }
     }
-    void add_transform(CollectionOutputEntry e)    { pt_list.push_back(e); }
+    void add_ptransform(PTransform* ptransform) { ptransform_list.push_back(ptransform); } // TODO: entry -> transform
     int num_local_workers()    { return local_workers.size(); }
-    vector<WorkerDescriptor>& get_local_workers()    { return local_workers; }
-    vector<WorkerDescriptor>& get_workers()    { return workers; }
+    std::vector<WorkerDescriptor>& get_local_workers()    { return local_workers; }
+    std::vector<WorkerDescriptor>& get_workers()    { return workers; }
   };
 
   struct Task 
   {
-    int id; // unique id in a stage for this task
-    int bind_socket_id; // socket id to bound to
+    int  id; // unique id in a stage for this task
+    int  socket_id; // socket id to bound to
     bool launched;
     std::vector<Thread> worker_thread_list; // one thread for each task transform
-    Task(int task_id) : id(task_id), bind_socket_id(-1), launched(false) {}
-    int bind_socket(int bind_socket_id) {
-      this->bind_socket_id = bind_socket_id;
+    Task(int task_id) : id(task_id), socket_id(-1), launched(false) {}
+    Task(Task&& task) =default; // default move constructor
+
+    void bind_socket_id(int socket_id) {
+      this->socket_id = socket_id;
     }
     InputChannelList stage_input_channels; // from last stage
     std::vector<LocalOutputChannel*> intermediate_output_channels; // intra-stage
@@ -204,8 +254,8 @@ struct DistributedPipelineScheduler {
 
       if (transform_instance_list.size() == 1) {
         worker_thread_list.push_back(std::move(Thread([this](){
-          if (bind_socket_id > 0) {
-            numa_run_on_node(bind_socket_id);
+          if (socket_id > 0) {
+            numa_run_on_node(socket_id);
           }
           PTInstance* instance = transform_instance_list[0];
           PTransform* ptransform = instance->ptransform;
@@ -213,10 +263,10 @@ struct DistributedPipelineScheduler {
           ptransform->execute(stage_input_channels, stage_output_channels, state);
         })));
       } else {
-        for(int i=0; i<transform_instance_list.size(); i++) {
+        for(size_t i=0; i<transform_instance_list.size(); i++) {
           worker_thread_list.push_back(std::move(Thread([this, i](){
-            if (bind_socket_id > 0) {
-              numa_run_on_node(bind_socket_id);
+            if (socket_id > 0) {
+              numa_run_on_node(socket_id);
             }
             PTInstance* pti = transform_instance_list[i];
             PTransform* pt  = pti->ptransform;
@@ -246,6 +296,7 @@ struct DistributedPipelineScheduler {
       for (Thread& worker_thread : worker_thread_list) {
         worker_thread.join();
       }
+      worker_thread_list.clear();
       launched = false;
     }
   };
@@ -266,8 +317,8 @@ struct DistributedPipelineScheduler {
       Stage stage;
       stage.set_device(entry.via_transform->device);
       while (entry.via_transform->is_elementwise()) {
-        stage.add_transform(entry);
-        if (entry.target_collection == NULL) {
+        stage.add_ptransform(entry.via_transform);
+        if (entry.target_collection->outputs.size() == 0) {
           stages.push_back(std::move(stage));
           return;
         }
@@ -275,9 +326,8 @@ struct DistributedPipelineScheduler {
         entry = entry.target_collection->outputs[0];
       }
       assert(entry.via_transform->is_shuffle());
-      stage.add_transform(entry);
+      stage.add_ptransform(entry.via_transform);
       stages.push_back(std::move(stage));
-      assert(entry.target_collection != NULL); // there must at least one element-wise operator after a shuffle
       assert(entry.target_collection->outputs.size() == 1);
       entry = entry.target_collection->outputs[0];
     }
@@ -292,19 +342,19 @@ struct DistributedPipelineScheduler {
       Stage& stage = stages[i];
       int num_workers = stage.get_workers().size();
       int num_local_workers = stage.get_local_workers().size();
-      int num_transforms = stage.pt_list.size();
+      int num_transforms = stage.ptransform_list.size();
       printf("  num_workers = %d\n", num_workers);
       printf("  num_local_workers = %d\n", num_local_workers);
       printf("  num_transforms = %d\n", num_transforms);
-      for(PTransform* pt : stage.pt_list) {
-        string display_name = pt->display_name();
-        printf("    %s\n", display_name.c_str());
+      for(PTransform* ptransform : stage.ptransform_list) {
+        string display_name = ptransform->display_name();
+        printf("    %s\n", ptransform->display_name().c_str());
       }
     }
   }
 
   void construct_tasks() {
-    for (int stage_id=0; stage_id<stages.size(); stage_id++) {
+    for (uint64_t stage_id=0; stage_id<stages.size(); stage_id++) {
       Stage& stage = stages[stage_id];
       StageContext stageContext;
       stageContext.stage = &stage;
@@ -315,9 +365,9 @@ struct DistributedPipelineScheduler {
         if (local_wd.has_socket_id()) {
           task.bind_socket_id(local_wd.socket_id());
         }
-        for (int i=0; i<stage.pt_list.size(); i++) {
-          CollectionOutputEntry& entry = stage.pt_list[i];
-          PTInstance* pti = entry.via_transform->create_instance(i);
+        for (size_t i=0; i<stage.ptransform_list.size(); i++) {
+          PTransform* ptransform = stage.ptransform_list[i];
+          PTInstance* pti = ptransform->create_instance(i);
           task.transform_instance_list.push_back(pti);
         }
         if (stage_id > 0) {
@@ -342,9 +392,10 @@ struct DistributedPipelineScheduler {
             int worker_rank = wd.rank();
             int worker_lid  = wd.lid();
             OutputChannel* output_channel = ChannelMgr::create_output_channel(worker_rank, worker_lid);
+            task.stage_output_channels.push_back(output_channel);
           }
         }
-        stageContext.tasks.push_back(task);
+        stageContext.tasks.push_back(std::move(task));
       }
       stage_context_list.push_back(std::move(stageContext));
     }
@@ -356,9 +407,17 @@ struct DistributedPipelineScheduler {
     printf("  num_stage_context = %d\n", num_stage_context);
     for(int i=0; i<num_stage_context; i++) {
       StageContext& sc = stage_context_list[i];
-      printf("    %s\n", sc.stage->display_name.c_str());
       int num_tasks = sc.tasks.size();
       printf("    num_tasks = %d\n", num_tasks);
+      for(int j=0; j<num_tasks; j++) {
+        Task& task = sc.tasks[j];
+        int id = task.id;
+        int socket_id = task.socket_id;
+        int num_transforms = task.transform_instance_list.size();
+        int stage_input_size = task.stage_input_channels.size();
+        int stage_output_size = task.stage_output_channels.size();
+        printf("    task_id=%d  socket_id=%d  num_transforms=%d  stage_input_size=%d  stage_output_size=%d\n", id, socket_id, num_transforms, stage_input_size, stage_output_size);
+      }
     }
   }
 
@@ -392,14 +451,10 @@ struct DistributedPipelineScheduler {
 struct Pipeline {
   Pipeline() {}
 
-  Pipeline* create() {
-    return new Pipeline;
-  }
-
   CollectionOutputEntryList outputs;
 
-  template <typename InputT, typename OutputT>
-  PCollection* apply(TaggedPTransform<InputT, OutputT>* pt) {
+  template <typename OutputT>
+  PCollection<OutputT>* apply(TaggedPTransform<PCollectionInput, OutputT>* pt) {
     PCollection<OutputT>* result = new PCollection<OutputT>;
     CollectionOutputEntry entry;
     entry.target_collection = result;
@@ -410,9 +465,13 @@ struct Pipeline {
 
   void run() {
     DistributedPipelineScheduler scheduler(outputs);
-    scheduler.run();
-    scheduler.join();
+    // scheduler.run();
+    // scheduler.join();
   }
 };
+
+std::unique_ptr<Pipeline> make_pipeline() {
+  return std::make_unique<Pipeline>();
+}
 
 #include "canal_impl.h"
