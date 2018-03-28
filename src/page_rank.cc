@@ -29,10 +29,10 @@ using namespace std;
 #define MPI_DEBUG
 
 #ifdef MPI_DEBUG
+#define assert(COND) do{if(!(COND)) {printf("ASSERTION VIOLATED, PROCESS pid = %d PAUSED\n", getpid()); while(1);}}while(0)
 static void MPI_Comm_err_handler_function(MPI_Comm* comm, int* errcode, ...) {
   assert(0);
 }
-#define assert(COND) do{if(!(COND)) {printf("ASSERTION VIOLATED, PROCESS pid = %d PAUSED\n", getpid()); while(1);}}while(0)
 #define LINES do{printf("  %d> %s:%d\n", g_rank, __FUNCTION__, __LINE__);}while(0)
 static void signal_handler(int sig) {
   printf("SIGNAL %d ENCOUNTERED, PROCESS pid = %d PAUSED\n", sig, getpid());
@@ -615,14 +615,14 @@ void RunPageRankPushAM(LaunchConfig config, Graph<NodeT, IndexT>& graph, double*
                 int    buf_id = buf_id_list[dst_rank];
                 size_t curr_bytes = curr_bytes_list[dst_rank];
                 if (curr_bytes + sizeof(UpdateRequest) > MPI_SEND_BUFFER_SIZE) {
-                  LINES;
+                  // LINES;
                   int flag = 0;
+                  // printf("  %d> send %zu bytes to %d\n", g_rank, curr_bytes, dst_rank);
+                  MPI_Isend(sendbuf[dst_rank][buf_id], curr_bytes, MPI_CHAR, dst_rank, TAG_DATA, MPI_COMM_WORLD, &req[dst_rank][buf_id]);
                   while (!flag) {
                     MPI_Test(&req[dst_rank][buf_id^1], &flag, MPI_STATUS_IGNORE);
                   }
-                  printf("  %d> send %zu bytes to %d\n", g_rank, curr_bytes, dst_rank);
-                  //MPI_Isend(sendbuf[dst_rank][buf_id], curr_bytes, MPI_CHAR, dst_rank, TAG_DATA, MPI_COMM_WORLD, &req[dst_rank][buf_id]);
-                  MPI_Send(sendbuf[dst_rank][buf_id], curr_bytes, MPI_CHAR, dst_rank, TAG_DATA, MPI_COMM_WORLD);
+                  // MPI_Send(sendbuf[dst_rank][buf_id], curr_bytes, MPI_CHAR, dst_rank, TAG_DATA, MPI_COMM_WORLD);
                   buf_id = buf_id ^ 1;
                   curr_bytes = 0;
                   curr_bytes_list[dst_rank] = curr_bytes;
@@ -680,7 +680,7 @@ void RunPageRankPushAM(LaunchConfig config, Graph<NodeT, IndexT>& graph, double*
         MPI_Status st;
         MPI_Test(&req[buf_id], &flag, &st);
         if (flag) {
-          printf("  %d> RECEIVED FROM %d\n", g_rank, st.MPI_SOURCE);
+          // printf("  %d> RECEIVED FROM %d\n", g_rank, st.MPI_SOURCE);
           MPI_Irecv(recvbuf[buf_id^1], MPI_RECV_BUFFER_SIZE, MPI_CHAR, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &req[buf_id^1]);
           // int source = st.MPI_SOURCE;
           int tag    = st.MPI_TAG;
@@ -702,7 +702,7 @@ void RunPageRankPushAM(LaunchConfig config, Graph<NodeT, IndexT>& graph, double*
             printf("  %d> CLOSE RECEIVED (%d/%d)\n", g_rank, *importer_num_close_request, nprocs);
           }
           buf_id = buf_id^1;
-          LINES;
+          // LINES;
         }
         if (*importer_num_close_request == num_export_threads * nprocs) {
           num_flush++;
@@ -712,8 +712,8 @@ void RunPageRankPushAM(LaunchConfig config, Graph<NodeT, IndexT>& graph, double*
         }
       }
       printf("  %d> IMPORT EXIT\n", g_rank);
+      MPI_Cancel(&req[buf_id]);
       for (int i=0; i<2; i++) {
-        MPI_Cancel(&req[i]);
         req[i] = MPI_REQUEST_NULL;
         am_free(recvbuf[i]);
         recvbuf[i] = NULL;
@@ -868,9 +868,10 @@ double my_abs(double val) {
 }
 
 int main(int argc, char* argv[]) {
+  int required_level = MPI_THREAD_MULTIPLE;
   int provided_level;
-  MPI_Init_thread(NULL, NULL, MPI_THREAD_SERIALIZED, &provided_level);
-  assert(provided_level >= MPI_THREAD_SERIALIZED);
+  MPI_Init_thread(NULL, NULL, required_level, &provided_level);
+  assert(provided_level >= required_level);
   init_debug();
   int rank, nprocs;
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
