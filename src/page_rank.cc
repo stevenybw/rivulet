@@ -383,7 +383,7 @@ void* malloc_pinned(size_t size) {
 }
 
 template <typename NodeT, typename IndexT>
-void RunPageRankPush(Graph<NodeT, IndexT>& graph, double* src, double* dst, uint32_t chunk_size) {
+void RunPageRankPush(Graph<NodeT, IndexT>& graph, double* src, double* next_val, uint32_t chunk_size) {
   size_t num_nodes = graph._num_nodes;
   #pragma omp parallel
   {
@@ -404,11 +404,11 @@ void RunPageRankPush(Graph<NodeT, IndexT>& graph, double* src, double* dst, uint
         for (uint64_t idx=from; idx<to; idx++) {
           uint32_t y = graph._edges[idx];
           #if defined(UPDATE_SEQUENTIAL)
-          PageRankAggregator::update(&dst[y], contrib);
+          PageRankAggregator::update(&next_val[y], contrib);
           #elif defined(UPDATE_CAS)
-          PageRankAggregator::cas_atomic_update(&dst[y], contrib);
+          PageRankAggregator::cas_atomic_update(&next_val[y], contrib);
           #elif defined(UPDATE_BATCHED_RTM)
-          PageRankAggregator::batched_atomic_update(&dst[y], contrib);
+          PageRankAggregator::batched_atomic_update(&next_val[y], contrib);
           #else
           #error "Specify a mode"
           #endif
@@ -509,8 +509,17 @@ void AM_Init(LaunchConfig config) {
 #define ROL(val, bits) (((val)>>(64-(bits)))|((val)<<(bits)))
 #define ROR(val, bits) (((val)>>(bits))|((val)<<(64-(bits))))
 
-template <typename NodeT, typename IndexT>
-void RunPageRankPushAM(LaunchConfig config, Graph<NodeT, IndexT>& graph, double* src, double* dst, uint32_t chunk_size, uint64_t* duration_out) {
+template <typename T>
+struct __attribute__((packed)) GeneralUpdateRequest {
+  uint32_t y;
+  T contrib;
+};
+
+template <typename NodeT, typename IndexT, typename VertexT, typename UpdateCallback>
+void edge_map(LaunchConfig config, Graph<NodeT, IndexT>& graph, VertexT* curr_val, VertexT* next_val, uint32_t chunk_size, const UpdateCallback& update_op)
+{
+  using UpdateRequest = GeneralUpdateRequest<VertexT>;
+
   int rank, nprocs;
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
   MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
@@ -519,8 +528,10 @@ void RunPageRankPushAM(LaunchConfig config, Graph<NodeT, IndexT>& graph, double*
   // int      part_id            = graph._part_id;
   // int      num_parts          = graph._num_parts;
 
-  cout << "  graph vertex num = " << graph._num_nodes << endl;
-  cout << "  graph edges num = " << graph._num_edges << endl;
+  if (rank == 0) {
+    cout << "  graph vertex num = " << graph._num_nodes << endl;
+    cout << "  graph edges num = " << graph._num_edges << endl;
+  }
 
   *num_client_done = 0;
   *num_import_done = 0;
@@ -541,9 +552,11 @@ void RunPageRankPushAM(LaunchConfig config, Graph<NodeT, IndexT>& graph, double*
   int* updater_socket_list = config.updater_socket_list;
   int* comm_socket_list = config.comm_socket_list;
 
-  cout << "  channel_num = " << channel_num << endl;
-  cout << "  channel_bytes = " << channel_bytes << endl;
-  cout << "  updater_block_size = " << (1LL<<updater_block_size_po2) << endl;
+  if (rank == 0) {
+    cout << "  channel_num = " << channel_num << endl;
+    cout << "  channel_bytes = " << channel_bytes << endl;
+    cout << "  updater_block_size = " << (1LL<<updater_block_size_po2) << endl;
+  }
 
   if (num_client_threads < 1 || num_updater_threads < 1) {
     cout << "Insufficient number of threads: " << num_client_threads << ", " << num_updater_threads << endl;
@@ -552,18 +565,16 @@ void RunPageRankPushAM(LaunchConfig config, Graph<NodeT, IndexT>& graph, double*
 
   std::thread updater_threads[num_updater_threads];
   for (int i=0; i<num_updater_threads; i++) {
-    updater_threads[i] = std::move(std::thread([](int id, int socket_id, int num_client_threads, int num_import_threads, volatile int* client_dones, volatile int* import_dones, double* dst) {
+    updater_threads[i] = std::move(std::thread([&update_op](int id, int socket_id, int num_client_threads, int num_import_threads, volatile int* client_dones, volatile int* import_dones, VertexT* next_val) {
       uint64_t num_updates = 0;
-      auto process_callback = [dst, &num_updates](const char* ptr, size_t bytes) {
+      auto process_callback = [next_val, &update_op, &num_updates](const char* ptr, size_t bytes) {
         num_updates += bytes / sizeof(UpdateRequest);
         assert(bytes % sizeof(UpdateRequest) == 0);
         const UpdateRequest* req_ptr = (const UpdateRequest*) ptr;
-        // volatile double sum_contrib = 0.0;
         for(size_t offset=0; offset<bytes; offset+=sizeof(UpdateRequest)) {
           uint64_t llid = req_ptr->y;
-          double contrib = req_ptr->contrib;
-          dst[llid] += contrib;
-          // sum_contrib += contrib;
+          VertexT contrib = req_ptr->contrib;
+          update_op(&next_val[llid], contrib);
           req_ptr++;
         }
       };
@@ -578,7 +589,7 @@ void RunPageRankPushAM(LaunchConfig config, Graph<NodeT, IndexT>& graph, double*
         }
       }
       printf(">>  updater thread %d request = %lu\n", id, num_updates);
-    }, i, updater_socket_list[i/num_updater_threads_per_socket], num_client_threads, num_import_threads, num_client_done, num_import_done, dst));
+    }, i, updater_socket_list[i/num_updater_threads_per_socket], num_client_threads, num_import_threads, num_client_done, num_import_done, next_val));
   }
 
   std::thread export_threads[num_export_threads];
@@ -606,55 +617,55 @@ void RunPageRankPushAM(LaunchConfig config, Graph<NodeT, IndexT>& graph, double*
             const UpdateRequest* req_ptr = (const UpdateRequest*) ptr;
             for(size_t offset=0; offset<bytes; offset+=sizeof(UpdateRequest)) {
               uint64_t y = req_ptr->y;
-              int dst_rank = graph.get_rank_from_vid(y);
-              uint32_t dst_llid = graph.get_llid_from_vid(y);
+              int next_val_rank = graph.get_rank_from_vid(y);
+              uint32_t next_val_llid = graph.get_llid_from_vid(y);
               UpdateRequest update_request;
-              update_request.y = dst_llid;
+              update_request.y = next_val_llid;
               update_request.contrib = req_ptr->contrib;
               {
-                int    buf_id = buf_id_list[dst_rank];
-                size_t curr_bytes = curr_bytes_list[dst_rank];
+                int    buf_id = buf_id_list[next_val_rank];
+                size_t curr_bytes = curr_bytes_list[next_val_rank];
                 if (curr_bytes + sizeof(UpdateRequest) > MPI_SEND_BUFFER_SIZE) {
                   // LINES;
                   int flag = 0;
-                  // printf("  %d> send %zu bytes to %d\n", g_rank, curr_bytes, dst_rank);
-                  MPI_Isend(sendbuf[dst_rank][buf_id], curr_bytes, MPI_CHAR, dst_rank, TAG_DATA, MPI_COMM_WORLD, &req[dst_rank][buf_id]);
+                  // printf("  %d> send %zu bytes to %d\n", g_rank, curr_bytes, next_val_rank);
+                  MPI_Isend(sendbuf[next_val_rank][buf_id], curr_bytes, MPI_CHAR, next_val_rank, TAG_DATA, MPI_COMM_WORLD, &req[next_val_rank][buf_id]);
                   while (!flag) {
-                    MPI_Test(&req[dst_rank][buf_id^1], &flag, MPI_STATUS_IGNORE);
+                    MPI_Test(&req[next_val_rank][buf_id^1], &flag, MPI_STATUS_IGNORE);
                   }
-                  // MPI_Send(sendbuf[dst_rank][buf_id], curr_bytes, MPI_CHAR, dst_rank, TAG_DATA, MPI_COMM_WORLD);
+                  // MPI_Send(sendbuf[next_val_rank][buf_id], curr_bytes, MPI_CHAR, next_val_rank, TAG_DATA, MPI_COMM_WORLD);
                   buf_id = buf_id ^ 1;
                   curr_bytes = 0;
-                  curr_bytes_list[dst_rank] = curr_bytes;
-                  buf_id_list[dst_rank] = buf_id;
+                  curr_bytes_list[next_val_rank] = curr_bytes;
+                  buf_id_list[next_val_rank] = buf_id;
                 }
-                memcpy(&sendbuf[dst_rank][buf_id][curr_bytes], &update_request, sizeof(UpdateRequest));
+                memcpy(&sendbuf[next_val_rank][buf_id][curr_bytes], &update_request, sizeof(UpdateRequest));
                 curr_bytes += sizeof(UpdateRequest);
-                curr_bytes_list[dst_rank] = curr_bytes;
+                curr_bytes_list[next_val_rank] = curr_bytes;
               }
               req_ptr++;
             }
           });
         }
       }
-      for (int dst_rank=0; dst_rank<nprocs; dst_rank++) {
-        int    buf_id = buf_id_list[dst_rank];
-        size_t curr_bytes = curr_bytes_list[dst_rank];
+      for (int next_val_rank=0; next_val_rank<nprocs; next_val_rank++) {
+        int    buf_id = buf_id_list[next_val_rank];
+        size_t curr_bytes = curr_bytes_list[next_val_rank];
         int flag = 0;
         while (!flag) {
-          MPI_Test(&req[dst_rank][buf_id], &flag, MPI_STATUS_IGNORE);
+          MPI_Test(&req[next_val_rank][buf_id], &flag, MPI_STATUS_IGNORE);
         }
-        req[dst_rank][buf_id] = MPI_REQUEST_NULL;
+        req[next_val_rank][buf_id] = MPI_REQUEST_NULL;
         while (!flag) {
-          MPI_Test(&req[dst_rank][buf_id^1], &flag, MPI_STATUS_IGNORE);
+          MPI_Test(&req[next_val_rank][buf_id^1], &flag, MPI_STATUS_IGNORE);
         }
-        req[dst_rank][buf_id^1] = MPI_REQUEST_NULL;
-        MPI_Send(sendbuf[dst_rank][buf_id], curr_bytes, MPI_CHAR, dst_rank, TAG_DATA, MPI_COMM_WORLD);
-        MPI_Send(NULL, 0, MPI_CHAR, dst_rank, TAG_CLOSE, MPI_COMM_WORLD);
+        req[next_val_rank][buf_id^1] = MPI_REQUEST_NULL;
+        MPI_Send(sendbuf[next_val_rank][buf_id], curr_bytes, MPI_CHAR, next_val_rank, TAG_DATA, MPI_COMM_WORLD);
+        MPI_Send(NULL, 0, MPI_CHAR, next_val_rank, TAG_CLOSE, MPI_COMM_WORLD);
         buf_id = buf_id ^ 1;
         curr_bytes = 0;
-        curr_bytes_list[dst_rank] = curr_bytes;
-        buf_id_list[dst_rank] = buf_id;
+        curr_bytes_list[next_val_rank] = curr_bytes;
+        buf_id_list[next_val_rank] = buf_id;
       }
     }, i, comm_socket_list[i/num_export_threads_per_socket], nprocs, num_client_threads, num_client_done));
   }
@@ -699,7 +710,7 @@ void RunPageRankPushAM(LaunchConfig config, Graph<NodeT, IndexT>& graph, double*
           } else if (tag == TAG_CLOSE) {
             assert(rbytes == 0);
             __sync_fetch_and_add(importer_num_close_request, 1);
-            printf("  %d> CLOSE RECEIVED (%d/%d)\n", g_rank, *importer_num_close_request, nprocs);
+            // printf("  %d> CLOSE RECEIVED (%d/%d)\n", g_rank, *importer_num_close_request, num_export_threads * nprocs);
           }
           buf_id = buf_id^1;
           // LINES;
@@ -711,17 +722,17 @@ void RunPageRankPushAM(LaunchConfig config, Graph<NodeT, IndexT>& graph, double*
           }
         }
       }
-      printf("  %d> IMPORT EXIT\n", g_rank);
+      // printf("  %d> IMPORT EXIT\n", g_rank);
       MPI_Cancel(&req[buf_id]);
       for (int i=0; i<2; i++) {
         req[i] = MPI_REQUEST_NULL;
         am_free(recvbuf[i]);
         recvbuf[i] = NULL;
       }
-      for (int dst=0; dst<num_updater_threads; dst++) {
-        size_t curr_bytes = counter[dst];
-        from_imports[tid][dst].flush_and_wait_explicit(curr_bytes);
-        counter[dst] = 0;
+      for (int next_val=0; next_val<num_updater_threads; next_val++) {
+        size_t curr_bytes = counter[next_val];
+        from_imports[tid][next_val].flush_and_wait_explicit(curr_bytes);
+        counter[next_val] = 0;
       }
       __sync_fetch_and_add(import_dones, 1);
     }, i, comm_socket_list[i/num_import_threads_per_socket], nprocs, num_export_threads, num_updater_threads, importer_num_close_request, num_import_done));
@@ -731,7 +742,6 @@ void RunPageRankPushAM(LaunchConfig config, Graph<NodeT, IndexT>& graph, double*
   uint64_t num_local_nodes = graph.num_local_nodes();
   uint32_t num_chunks      = num_local_nodes/chunk_size;
   *current_chunk_id        = 0;
-  uint64_t duration = -currentTimeUs();
 
   #pragma omp parallel num_threads(num_client_threads)
   {
@@ -763,7 +773,7 @@ void RunPageRankPushAM(LaunchConfig config, Graph<NodeT, IndexT>& graph, double*
       for (uint32_t i=chunk_begin; i<chunk_end; i++) {
         uint64_t from  = graph.get_index_from_llid(i);
         uint64_t to    = graph.get_index_from_llid(i+1);
-        double contrib = src[i];
+        VertexT  contrib = curr_val[i];
         edges_processed += (to-from);
         for (uint64_t idx=from; idx<to; idx++) {
           uint32_t vid = graph.get_edge_from_index(idx);
@@ -787,10 +797,10 @@ void RunPageRankPushAM(LaunchConfig config, Graph<NodeT, IndexT>& graph, double*
         }
       }
     }
-    for (int dst=0; dst<num_updater_threads; dst++) {
-      size_t curr_bytes = counter[dst];
-      channels[tid][dst].flush_and_wait_explicit(curr_bytes);
-      counter[dst] = 0;
+    for (int next_val=0; next_val<num_updater_threads; next_val++) {
+      size_t curr_bytes = counter[next_val];
+      channels[tid][next_val].flush_and_wait_explicit(curr_bytes);
+      counter[next_val] = 0;
     }
     for (int export_id=0; export_id<num_export_threads; export_id++) {
       size_t curr_bytes = export_counter[export_id];
@@ -811,27 +821,27 @@ void RunPageRankPushAM(LaunchConfig config, Graph<NodeT, IndexT>& graph, double*
     import_threads[i].join();
   }
 
-  duration += currentTimeUs();
-
-  (*duration_out) = duration;
-
   uint64_t sum_ep = 0;
   uint64_t max_ep = 0;
   for(int i=0; i<num_client_threads; i++) {
     uint64_t ep = edges_processed_per_thread[i];
-    printf("client thread %2d: processed edges = %lu\n", i, ep);
+    printf("  %d> client thread %2d: processed edges = %lu\n", g_rank, i, ep);
     if (ep > max_ep) max_ep = ep;
     sum_ep += ep;
   }
+  uint64_t global_sum_ep = 0;
+  uint64_t global_max_ep = 0;
+  MPI_Allreduce(&sum_ep, &global_sum_ep, 1, MPI_UNSIGNED_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
+  MPI_Allreduce(&max_ep, &global_max_ep, 1, MPI_UNSIGNED_LONG_LONG, MPI_MAX, MPI_COMM_WORLD);
   // printf("  avg_client_processed_edge = %lf\n", 1.0*sum_ep/num_client_threads);
   // printf("  max_client_processed_edge = %lf\n", 1.0*max_ep);
-  printf(">>> client load imbalance = %lf\n", (1.0*max_ep)/(1.0*sum_ep/num_client_threads));
-
-  // printf(">>> actual duration = %lf\n", (1e-6 * duration));
+  if (rank == 0) {
+    printf(">>> client load imbalance = %lf\n", (1.0*global_max_ep)/(1.0*global_sum_ep/nprocs/num_client_threads));
+  }
 }
 
 template <typename NodeT, typename IndexT>
-void RunPageRankPull(Graph<NodeT, IndexT>& graph_t, double* src, double* dst, uint32_t chunk_size) {
+void RunPageRankPull(Graph<NodeT, IndexT>& graph_t, double* src, double* next_val, uint32_t chunk_size) {
   printf("PULL\n");
   size_t num_nodes = graph_t._num_nodes;
   #pragma omp parallel
@@ -852,7 +862,7 @@ void RunPageRankPull(Graph<NodeT, IndexT>& graph_t, double* src, double* dst, ui
         for (uint64_t idx=from; idx<to; idx++) {
           uint32_t x = graph_t._edges[idx];
           double contrib = src[x];
-          dst[y] += contrib;
+          next_val[y] += contrib;
         }
       }
     }
@@ -931,15 +941,15 @@ int main(int argc, char* argv[]) {
   size_t num_nodes = graph.num_local_nodes();
 
   double* src = (double*) malloc_pinned(num_nodes * sizeof(double));
-  double* dst = (double*) malloc_pinned(num_nodes * sizeof(double));
-  // double* dst_1 = (double*) malloc_pinned(num_nodes * sizeof(double));
+  double* next_val = (double*) malloc_pinned(num_nodes * sizeof(double));
+  // double* next_val_1 = (double*) malloc_pinned(num_nodes * sizeof(double));
 
   for (size_t i=0; i<num_nodes; i++) {
     src[i] = 0.0;
-    //dst[i] = 0.0;
-    //dst_1[i] = 0.0;
-    dst[i] = 1.0 - alpha;
-    // dst_1[i] = 1.0 - alpha;
+    //next_val[i] = 0.0;
+    //next_val_1[i] = 0.0;
+    next_val[i] = 1.0 - alpha;
+    // next_val_1[i] = 1.0 - alpha;
   }
 
   if (run_mode_i == RUN_MODE_DELEGATION_PWQ) {
@@ -951,7 +961,7 @@ int main(int argc, char* argv[]) {
     }
     // interleave to updater's socket
     // interleave_memory(src, num_nodes * sizeof(double), 4096, launch_config.updater_socket_list, launch_config.num_updater_sockets);
-    // interleave_memory(dst, num_nodes * sizeof(double), 4096, launch_config.updater_socket_list, launch_config.num_updater_sockets);
+    // interleave_memory(next_val, num_nodes * sizeof(double), 4096, launch_config.updater_socket_list, launch_config.num_updater_sockets);
     AM_Init(launch_config);
   }
 
@@ -963,43 +973,21 @@ int main(int argc, char* argv[]) {
     
     #pragma omp parallel for // schedule(dynamic, chunk_size)
     for(uint32_t i=0; i<num_nodes; i++) {
-      src[i] = alpha * dst[i] / (double)(graph.get_index_from_llid(i+1) - graph.get_index_from_llid(i));
-      dst[i] = 1.0 - alpha;
-      // dst_1[i] = 1.0 - alpha;
+      src[i] = alpha * next_val[i] / (double)(graph.get_index_from_llid(i+1) - graph.get_index_from_llid(i));
+      next_val[i] = 1.0 - alpha;
+      // next_val_1[i] = 1.0 - alpha;
     }
 
     if (run_mode_i == RUN_MODE_PUSH) {
-      RunPageRankPush(graph, src, dst, chunk_size);
+      RunPageRankPush(graph, src, next_val, chunk_size);
     } else if (run_mode_i == RUN_MODE_PULL) {
-      RunPageRankPull(graph_t, src, dst, chunk_size);
+      RunPageRankPull(graph_t, src, next_val, chunk_size);
     } else if (run_mode_i == RUN_MODE_DELEGATION_PWQ) {
-      uint64_t kernel_duration;
       LaunchConfig launch_config;
       launch_config.load_from_config_file("launch.conf");
       launch_config.distributed_round_robin_socket(rank, g_num_sockets);
       // launch_config.load_from_config_file("launch.conf");
-      RunPageRankPushAM(launch_config, graph, src, dst, chunk_size, &kernel_duration);
-      if (rank == 0) {printf(">>> kernel duration = %lf\n", (1e-6 * kernel_duration));}
-      sum_kernel_duration += kernel_duration;
-
-#if 0
-      printf("Validating...\n");
-      RunPageRankPush(graph, src, dst_1, chunk_size);
-      double sum0 = 0.0;
-      double sum1 = 0.0;
-      for(size_t i=0; i<num_nodes; i++) {
-        if (my_abs(dst[i] - dst_1[i]) >= 1e-4) {
-          printf("pagerank of node %d is different, correct %lf, actual %lf\n", i, dst_1[i], dst[i]);
-        }
-        sum0 += dst[i];
-        sum1 += dst_1[i];
-      }
-      if (my_abs(sum0 - sum1) >= 1e-3) {
-        printf("!!!pagerank summary is different! correct %lf, actual %lf\n", sum1, sum0);
-      } else {
-        printf("pagerank summary is the same correct %lf, actual %lf\n", sum1, sum0);
-      }
-#endif
+      edge_map(launch_config, graph, src, next_val, chunk_size, [](double* next_val, double contrib){*next_val += contrib;});
     }
 
     MPI_Barrier(MPI_COMM_WORLD);
@@ -1007,7 +995,7 @@ int main(int argc, char* argv[]) {
 
     double sum = 0.0;
     for (size_t i=0; i<num_nodes; i++) {
-      sum += dst[i];
+      sum += next_val[i];
     }
     double global_sum;
     MPI_Allreduce(&sum, &global_sum, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
