@@ -11,12 +11,48 @@
 #include <numa.h>
 #include <mpi.h>
 
-#include "channel.h"
-
 using Thread = std::thread;
 //using string = std::string;
 
 using namespace std;
+
+struct InputChannel
+{
+  bool eos() {
+    assert(false); //TODO
+    return false;
+  };
+};
+
+struct OutputChannel
+{
+  void close() {
+    assert(false); //TODO
+  }
+};
+
+struct LocalInputChannel : public InputChannel
+{
+};
+
+struct LocalOutputChannel : public OutputChannel
+{
+};
+
+struct ChannelMgr 
+{
+  static InputChannel* create_input_channel(int from_rank, int from_lid) {
+    return NULL; //TODO
+  }
+  static OutputChannel* create_output_channel(int to_rank, int to_lid) {
+    return NULL; //TODO
+  }
+  static std::tuple<LocalOutputChannel*, LocalInputChannel*> create_local_channels() {
+    LocalOutputChannel* out = NULL;
+    LocalInputChannel* in = NULL;
+    return std::make_tuple(out, in); //TODO
+  }
+};
 
 using InputChannelList = std::vector<InputChannel*>;
 using OutputChannelList = std::vector<OutputChannel*>;
@@ -151,7 +187,7 @@ struct PCollection : public PCollectionBase
 // Scheduler fo a pipeline (assume a strait pipeline, no diverge), and support
 // distributed environment.
 struct DistributedPipelineScheduler {
-  struct Stage
+  struct Stage 
   {
     Stage() : device(NULL) {}
     // @TODO add move constructor
@@ -185,7 +221,7 @@ struct DistributedPipelineScheduler {
         }
       }
     }
-    void add_ptransform(PTransform* ptransform) { ptransform_list.push_back(ptransform); }
+    void add_ptransform(PTransform* ptransform) { ptransform_list.push_back(ptransform); } // TODO: entry -> transform
     int num_local_workers()    { return local_workers.size(); }
     std::vector<WorkerDescriptor>& get_local_workers()    { return local_workers; }
     std::vector<WorkerDescriptor>& get_workers()    { return workers; }
