@@ -3,15 +3,27 @@
 
 #include "common.h"
 
+#include <string.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/time.h>
+#include <sys/types.h>
+#include <unistd.h>
+
 #include <fstream>
 #include <iostream>
 #include <string>
 
 using namespace std;
 
-void memcpy_nts(void* dst, const void* src, size_t bytes);
+void  am_free(void* ptr);
 void* am_memalign(size_t align, size_t size);
-void am_free(void* ptr);
+bool  is_power_of_2(uint64_t num);
+void* malloc_pinned(size_t size);
+void  memcpy_nts(void* dst, const void* src, size_t bytes);
+
+void interleave_memory(void* ptr, size_t size, size_t chunk_size, int* node_list, int num_nodes);
+void pin_memory(void* ptr, size_t size);
 
 // Modular Approximation
 template <int num_elem>
@@ -143,6 +155,120 @@ struct LaunchConfig {
     _show_list("socket_list", socket_list, num_sockets);
     _show_list("updater_socket_list", updater_socket_list, num_updater_sockets);
     _show_list("comm_socket_list", comm_socket_list, num_comm_sockets);
+  }
+};
+
+struct AccumulateRequest {
+  double* target;
+  double rhs;
+};
+
+static constexpr int BATCH_SIZE = 32;
+static thread_local size_t tl_num_reqs = 0;
+static thread_local AccumulateRequest tl_acc_reqs[BATCH_SIZE];
+
+template <typename T>
+struct Atomic
+{ };
+
+template <>
+struct Atomic<double> {
+  const static double zero_value;
+  
+  static void update (double* p_lhs, double rhs) {
+    (*p_lhs) += rhs;
+  }
+
+  static void cas_atomic_update(double* p_lhs, double rhs) {
+    double lhs = *p_lhs;
+    // uint64_t i_lhs = *((uint64_t*) &lhs);
+    // dereferencing type-punned pointer will break strict-aliasing rules
+    uint64_t i_lhs;
+    memcpy(&i_lhs, &lhs, sizeof(uint64_t));
+    while(true) {
+      // total_attempt++;
+      double new_lhs = lhs + rhs;
+      uint64_t i_new_lhs;
+      memcpy(&i_new_lhs, &new_lhs, sizeof(uint64_t));
+      uint64_t i_current_lhs = __sync_val_compare_and_swap((uint64_t*) p_lhs, i_lhs, i_new_lhs);
+      if (i_current_lhs == i_lhs) {
+        break;
+      }
+      i_lhs = i_current_lhs;
+      memcpy(&lhs, &i_lhs, sizeof(uint64_t));
+      // num_retry++;
+    }
+  }
+
+  static void rtm_atomic_update(double* p_lhs, double rhs) {
+    // total_attempt++;
+    if(_xbegin() == (unsigned int) -1) {
+      *p_lhs += rhs;
+      _xend();
+    } else {
+      _mm_pause();
+      double lhs = *p_lhs;
+      uint64_t i_lhs;
+      memcpy(&i_lhs, &lhs, sizeof(uint64_t));
+      while(true) {
+        // total_attempt++;
+        double new_lhs = lhs + rhs;
+        uint64_t i_new_lhs;
+        memcpy(&i_new_lhs, &new_lhs, sizeof(uint64_t));
+        uint64_t i_current_lhs = __sync_val_compare_and_swap((uint64_t*) p_lhs, i_lhs, i_new_lhs);
+        if (i_current_lhs == i_lhs) {
+          break;
+        }
+        i_lhs = i_current_lhs;
+        memcpy(&lhs, &i_lhs, sizeof(uint64_t));
+        // num_retry++;
+        _mm_pause();
+      }
+    }
+  }
+
+  static void batched_atomic_update_flush(const int num_reqs) {
+    // total_attempt++;
+    if(_xbegin() == (unsigned int) -1) {
+      for(int i=0; i<num_reqs; i++) {
+        *(tl_acc_reqs[i].target) += tl_acc_reqs[i].rhs;
+      }
+      _xend();
+    } else {
+      _mm_pause();
+      for(int i=0; i<num_reqs; i++) {
+        double* p_lhs = tl_acc_reqs[i].target;
+        double rhs = tl_acc_reqs[i].rhs;
+
+        double lhs = *p_lhs;
+        uint64_t i_lhs;
+        memcpy(&i_lhs, &lhs, sizeof(uint64_t));
+        while(true) {
+          // total_attempt++;
+          double new_lhs = lhs + rhs;
+          uint64_t i_new_lhs;
+          memcpy(&i_new_lhs, &new_lhs, sizeof(uint64_t));
+          uint64_t i_current_lhs = __sync_val_compare_and_swap((uint64_t*) p_lhs, i_lhs, i_new_lhs);
+          if (i_current_lhs == i_lhs) {
+            break;
+          }
+          i_lhs = i_current_lhs;
+          memcpy(&lhs, &i_lhs, sizeof(uint64_t));
+          // num_retry++;
+          _mm_pause();
+        }
+      }
+    }
+    tl_num_reqs = 0;
+  }
+
+  static void batched_atomic_update(double* p_lhs, double rhs) {
+    tl_acc_reqs[tl_num_reqs].target = p_lhs;
+    tl_acc_reqs[tl_num_reqs].rhs = rhs;
+    tl_num_reqs++;
+    if (tl_num_reqs == BATCH_SIZE) {
+      batched_atomic_update_flush(BATCH_SIZE);
+    }
   }
 };
 

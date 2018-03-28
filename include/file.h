@@ -1,6 +1,16 @@
 #ifndef RIVULET_FILE_H
 #define RIVULET_FILE_H
 
+#include <fcntl.h>
+#include <stdio.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+
+#include <iostream>
+#include <string>
+
+using namespace std;
+
 #define FILE_MODE_READ_ONLY 0
 #define FILE_MODE_WRITE_ONLY 1
 #define FILE_MODE_READ_WRITE 2

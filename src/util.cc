@@ -1,6 +1,46 @@
+#include <stdio.h>
 #include <stdlib.h>
 #include <immintrin.h>
+#include <numa.h>
+#include <numaif.h>
+
 #include "util.h"
+
+void* pages[128*1024];
+int nodes[128*1024];
+int statuses[128*1024];
+
+void am_free(void* ptr) {
+  free(ptr);
+}
+
+void* am_memalign(size_t align, size_t size) {
+  void* ptr;
+  int ok = posix_memalign(&ptr, align, size);
+  assert(ok == 0);
+  return ptr;
+}
+
+bool is_power_of_2(uint64_t num) {
+  while (num>0 && (num&1)==0) {
+    num >>= 1;
+  }
+  if (num == 1) {
+    return true;
+  } else {
+    return false;
+  }
+}
+
+void* malloc_pinned(size_t size) {
+  // !NOTE: use memalign to allocate 256-bytes aligned buffer
+  void* ptr = am_memalign(4096, size);
+  if (mlock(ptr, size)<0) {
+    perror("mlock failed");
+    assert(false);
+  }
+  return ptr;
+}
 
 void memcpy_nts(void* dst, const void* src, size_t bytes) {
   if (bytes == 16) {
@@ -18,13 +58,28 @@ void memcpy_nts(void* dst, const void* src, size_t bytes) {
   }
 }
 
-void* am_memalign(size_t align, size_t size) {
-  void* ptr;
-  int ok = posix_memalign(&ptr, align, size);
-  assert(ok == 0);
-  return ptr;
+void interleave_memory(void* ptr, size_t size, size_t chunk_size, int* node_list, int num_nodes) {
+  printf("interleave begin");
+  assert(chunk_size == 4096);
+  char* buf = (char*) ptr;
+  size_t count = 0;
+  for(size_t pos=0; pos<size; pos+=chunk_size) {
+    pages[count] = &buf[pos];
+    nodes[count] = node_list[count % num_nodes];
+    statuses[count] = -1;
+    count++;
+  }
+  int ok = move_pages(0, count, pages, nodes, statuses, MPOL_MF_MOVE);
+  assert(ok != -1);
+  for(size_t i=0; i<count; i++) {
+    assert(statuses[i] == node_list[i % num_nodes]);
+  }
+  printf("interleave end");
 }
 
-void am_free(void* ptr) {
-  free(ptr);
+void pin_memory(void* ptr, size_t size) {
+  if (mlock(ptr, size) < 0) {
+    perror("mlock failed");
+    assert(false);
+  }
 }
