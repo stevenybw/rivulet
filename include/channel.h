@@ -1,6 +1,8 @@
 #ifndef RIVULET_CHANNEL_H
 #define RIVULET_CHANNEL_H
 
+#include <exception>
+
 #include "util.h"
 
 /*
@@ -136,8 +138,14 @@ struct Channel_1 {
   // inter-thread communication
   Sync* _sync;
 
+  // closed flag;
+  bool* _closed;
+
   Channel_1() {
-    init();
+    _sender_private = NULL;
+    _window = NULL;
+    _sync = NULL;
+    _closed = NULL;
   }
 
   void init() {
@@ -148,10 +156,14 @@ struct Channel_1 {
     _sync   = (Sync*) am_memalign(ALIGNMENT, sizeof(Sync));
     _sync->req.seq = 0;
     _sync->seq     = 0;
+    _closed = (bool*) malloc(sizeof(bool));
+    *_closed = false;
     assert((uintptr_t)(&(_window->data[0])) % ALIGNMENT == 0);
     assert((uintptr_t)(&(_window->data[1])) % ALIGNMENT == 0);
   }
 
+
+  /*
   void init(SenderPrivate* sender_private) {
     _window = (BufferWindow*) am_memalign(channel_bytes, sizeof(BufferWindow));
     _sender_private = sender_private;
@@ -160,6 +172,8 @@ struct Channel_1 {
     _sync   = (Sync*) am_memalign(ALIGNMENT, sizeof(Sync));
     _sync->req.seq = 0;
     _sync->seq     = 0;
+    _closed = malloc(sizeof(bool));
+    *_closed = false;
     assert((uintptr_t)(&(_window->data[0])) % ALIGNMENT == 0);
     assert((uintptr_t)(&(_window->data[1])) % ALIGNMENT == 0);
   }
@@ -172,12 +186,16 @@ struct Channel_1 {
     _sync   = (Sync*) am_memalign(ALIGNMENT, sizeof(Sync));
     _sync->req.seq = 0;
     _sync->seq     = 0;
+    _closed = malloc(sizeof(bool));
+    *_closed = false;
     assert((uintptr_t)(&(_window->data[0])) % ALIGNMENT == 0);
     assert((uintptr_t)(&(_window->data[1])) % ALIGNMENT == 0);
   }
+  */
 
   template <typename T>
   size_t push_explicit(const T& data, size_t curr_bytes) {
+    assert(!*_closed);
     size_t bytes = sizeof(T);
     int seq = _sender_private->seq;
     if (curr_bytes + bytes > channel_bytes) {
@@ -201,7 +219,33 @@ struct Channel_1 {
     return curr_bytes;
   }
 
+  template <typename T>
+  size_t push_explicit(const char* data, size_t bytes, size_t curr_bytes) {
+    assert(!*_closed);
+    int seq = _sender_private->seq;
+    if (curr_bytes + bytes > channel_bytes) {
+      _sender_private->seq = seq^1;
+      wait_for([this, seq](){return _sync->seq == seq;});
+      _mm_sfence();
+      _sync->req.bytes = curr_bytes;
+      _sync->req.ptr   = (uintptr_t) &(_window->data[seq]);
+      _sync->req.seq   = seq^1;
+      _mm_sfence();
+      seq ^= 1;
+      curr_bytes = 0;
+    }
+    if (use_nts) {
+      memcpy_nts(&(_window->data[seq][curr_bytes]), data, bytes);
+    } else {
+      memcpy(&(_window->data[seq][curr_bytes]), data, bytes);
+    }
+    curr_bytes += bytes;
+
+    return curr_bytes;
+  }
+
   size_t flush_and_wait_explicit(size_t curr_bytes) {
+    assert(!*_closed);
     int seq = _sender_private->seq;
     if (curr_bytes > 0) {
       wait_for([this, seq](){return _sync->seq == seq;});
@@ -220,6 +264,7 @@ struct Channel_1 {
 
   template <typename T>
   void push(const T& data) {
+    assert(!*_closed);
     size_t bytes = sizeof(T);
     int seq = _sender_private->seq;
     size_t curr_bytes = _sender_private->bytes;
@@ -245,6 +290,7 @@ struct Channel_1 {
   }
 
   void push(const char* data, size_t bytes) {
+    assert(!*_closed);
     int seq = _sender_private->seq;
     size_t curr_bytes = _sender_private->bytes;
     if (curr_bytes + bytes > channel_bytes) {
@@ -266,6 +312,7 @@ struct Channel_1 {
   }
 
   void flush_and_wait() {
+    assert(!*_closed);
     int seq = _sender_private->seq;
     size_t curr_bytes = _sender_private->bytes;
     if (curr_bytes > 0) {
@@ -281,6 +328,15 @@ struct Channel_1 {
     wait_for([this, seq](){return _sync->seq == seq;});
     _sender_private->seq = seq;
     _sender_private->bytes = curr_bytes;
+  }
+
+  void close() {
+    flush_and_wait();
+    *_closed = true;
+  }
+
+  bool eos() {
+    return *_closed;
   }
 
   template <typename Callable>

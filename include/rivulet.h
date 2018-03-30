@@ -1,8 +1,10 @@
 #include <algorithm>
+#include <exception>
 #include <fstream>
 #include <functional>
 #include <iostream>
 #include <list>
+#include <map>
 #include <memory>
 #include <set>
 #include <string>
@@ -11,48 +13,162 @@
 #include <numa.h>
 #include <mpi.h>
 
+#include "channel.h"
+
 using Thread = std::thread;
 //using string = std::string;
 
 using namespace std;
 
+// Raised if the channel being closed while pulling
+struct ChannelClosedException : public std::exception {
+  const char* what () const throw () {
+    return "ChannelClosedException";
+  }
+};
+
 struct InputChannel
 {
-  bool eos() {
-    assert(false); //TODO
-    return false;
-  };
+  virtual bool eos()=0;
+  virtual const void* pull(size_t bytes)=0;
 };
 
 struct OutputChannel
 {
-  void close() {
-    assert(false); //TODO
-  }
+  virtual void close()=0;
+  virtual void push(const void* data, size_t bytes)=0;
 };
+
+const size_t MAX_PULL_BYTES = 128*1024;
+const size_t LOCAL_CHANNEL_BUFFER_BYTES = 4*1024;
+const size_t MAX_LOCAL_TASKS_PER_STAGE = 256;
+using LocalChannelType = Channel_1<LOCAL_CHANNEL_BUFFER_BYTES>;
 
 struct LocalInputChannel : public InputChannel
 {
+  LocalChannelType channel;
+  char input_buffer[MAX_PULL_BYTES + LOCAL_CHANNEL_BUFFER_BYTES];
+  uint64_t used_bytes, total_bytes;
+
+  LocalInputChannel(LocalChannelType channel) : channel(channel), used_bytes(0), total_bytes(0) {}
+
+  const void* pull(size_t bytes) override {
+    assert(bytes <= MAX_PULL_BYTES);
+    if (total_bytes - used_bytes >= bytes) {
+      void* result = &input_buffer[used_bytes];
+      used_bytes += bytes;
+      return result;
+    } else {
+      memmove(&input_buffer[0], &input_buffer[used_bytes], total_bytes - used_bytes);
+      total_bytes = total_bytes - used_bytes;
+      used_bytes  = 0;
+      while (total_bytes < bytes) {
+        if (channel.eos()) {
+          throw ChannelClosedException();
+        }
+        channel.poll([this](const char* data, size_t data_bytes) {
+          memcpy(&input_buffer[total_bytes], data, data_bytes);
+          total_bytes += data_bytes;
+        });
+      }
+      used_bytes = bytes;
+      return &input_buffer[0];
+    }
+  }
+
+  bool eos() override {
+    return channel.eos();
+  }
 };
 
 struct LocalOutputChannel : public OutputChannel
 {
+  LocalChannelType channel;
+
+  LocalOutputChannel(LocalChannelType channel) : channel(channel) { }
+
+  void push(const void* data, size_t bytes) override {
+    channel.push((const char*) data, bytes);
+  }
+
+  void close() override {
+    channel.close();
+  }
 };
 
 struct ChannelMgr 
 {
-  static InputChannel* create_input_channel(int from_rank, int from_lid) {
-    return NULL; //TODO
+  std::map<int, std::pair<LocalChannelType, int>> local_channels;
+  int rank;
+  int nprocs;
+
+  ChannelMgr() {
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
   }
-  static OutputChannel* create_output_channel(int to_rank, int to_lid) {
-    return NULL; //TODO
+
+  InputChannel* create_input_channel(int from_rank, int from_stage, int from_lid, int to_lid) {
+    assert(from_lid <= MAX_LOCAL_TASKS_PER_STAGE);
+    assert(from_rank == rank); //TODO
+    int identifier = from_stage * MAX_LOCAL_TASKS_PER_STAGE * MAX_LOCAL_TASKS_PER_STAGE + from_lid * MAX_LOCAL_TASKS_PER_STAGE + to_lid;
+    LocalChannelType channel;
+    auto it = local_channels.find(identifier);
+    if (it != local_channels.end()) {
+      channel = it->second.first;
+      it->second.second++;
+    } else {
+      channel.init();
+      auto result = local_channels.emplace(identifier, std::make_pair(channel, 1));
+      assert(result.second == true);
+    }
+    return new LocalInputChannel(channel);
   }
-  static std::tuple<LocalOutputChannel*, LocalInputChannel*> create_local_channels() {
-    LocalOutputChannel* out = NULL;
-    LocalInputChannel* in = NULL;
-    return std::make_tuple(out, in); //TODO
+
+  OutputChannel* create_output_channel(int to_rank, int from_stage, int from_lid, int to_lid) {
+    assert(to_lid <= MAX_LOCAL_TASKS_PER_STAGE);
+    assert(to_rank == rank); //TODO
+    int identifier = from_stage * MAX_LOCAL_TASKS_PER_STAGE * MAX_LOCAL_TASKS_PER_STAGE + from_lid * MAX_LOCAL_TASKS_PER_STAGE + to_lid;
+    LocalChannelType channel;
+    auto it = local_channels.find(identifier);
+    if (it != local_channels.end()) {
+      channel = it->second.first;
+      it->second.second++;
+    } else {
+      channel.init();
+      auto result = local_channels.emplace(identifier, std::make_pair(channel, 1));
+      assert(result.second == true);
+    }
+    return new LocalOutputChannel(channel);
+  }
+
+  std::tuple<LocalOutputChannel*, LocalInputChannel*> create_local_channels() {
+    LocalChannelType channel;
+    channel.init();
+    LocalOutputChannel* out = new LocalOutputChannel(channel);
+    LocalInputChannel* in = new LocalInputChannel(channel);
+    return std::make_tuple(out, in);
+  }
+
+  void complete() {
+    cout << "  num_channel_pairs = " << local_channels.size() << endl;
+    for (auto& elem : local_channels) {
+      assert(elem.second.second == 2);
+    }
   }
 };
+
+void RV_Init()
+{
+  int required_level = MPI_THREAD_MULTIPLE;
+  int provided_level;
+  MPI_Init_thread(NULL, NULL, required_level, &provided_level);
+  assert(provided_level >= required_level);
+}
+
+void RV_Finalize()
+{
+  MPI_Finalize();
+}
 
 using InputChannelList = std::vector<InputChannel*>;
 using OutputChannelList = std::vector<OutputChannel*>;
@@ -221,7 +337,7 @@ struct DistributedPipelineScheduler {
         }
       }
     }
-    void add_ptransform(PTransform* ptransform) { ptransform_list.push_back(ptransform); } // TODO: entry -> transform
+    void add_ptransform(PTransform* ptransform) { ptransform_list.push_back(ptransform); }
     int num_local_workers()    { return local_workers.size(); }
     std::vector<WorkerDescriptor>& get_local_workers()    { return local_workers; }
     std::vector<WorkerDescriptor>& get_workers()    { return workers; }
@@ -229,11 +345,12 @@ struct DistributedPipelineScheduler {
 
   struct Task 
   {
+    int  stage_id;
     int  id; // unique id in a stage for this task
     int  socket_id; // socket id to bound to
     bool launched;
     std::vector<Thread> worker_thread_list; // one thread for each task transform
-    Task(int task_id) : id(task_id), socket_id(-1), launched(false) {}
+    Task(int stage_id, int task_id) : stage_id(stage_id), id(task_id), socket_id(-1), launched(false) {}
     Task(Task&& task) =default; // default move constructor
 
     void bind_socket_id(int socket_id) {
@@ -286,6 +403,7 @@ struct DistributedPipelineScheduler {
               tmp_icl[0] = intermediate_input_channels[i-1];
               pt->execute(tmp_icl, tmp_ocl, state);
             }
+            printf("  stage id %d, task id %d, transform id %d terminated\n", stage_id, id, i);
           })));
         }
       }
@@ -311,6 +429,7 @@ struct DistributedPipelineScheduler {
   int nprocs;
   std::vector<Stage> stages;
   std::vector<StageContext> stage_context_list;
+  ChannelMgr channel_mgr;
 
   void extract_stages(CollectionOutputEntry entry) {
     while (true) {
@@ -361,13 +480,13 @@ struct DistributedPipelineScheduler {
       int num_local_workers = stage.num_local_workers();
       for (int local_worker_id = 0; local_worker_id < num_local_workers; local_worker_id++) {
         const WorkerDescriptor& local_wd = stage.get_local_workers()[local_worker_id];
-        Task task(local_worker_id);
+        Task task(stage_id, local_worker_id);
         if (local_wd.has_socket_id()) {
           task.bind_socket_id(local_wd.socket_id());
         }
         for (size_t i=0; i<stage.ptransform_list.size(); i++) {
           PTransform* ptransform = stage.ptransform_list[i];
-          PTInstance* pti = ptransform->create_instance(i);
+          PTInstance* pti = ptransform->create_instance(local_worker_id);
           task.transform_instance_list.push_back(pti);
         }
         if (stage_id > 0) {
@@ -375,14 +494,14 @@ struct DistributedPipelineScheduler {
           for (const WorkerDescriptor& wd : previous_stage.get_workers()) {
             int worker_rank = wd.rank();
             int worker_lid  = wd.lid();
-            InputChannel* input_channel = ChannelMgr::create_input_channel(worker_rank, worker_lid);
+            InputChannel* input_channel = channel_mgr.create_input_channel(worker_rank, stage_id-1, worker_lid, local_worker_id);
             task.stage_input_channels.push_back(input_channel);
           }
         }
         for (int i=0; i<task.num_transforms()-1; i++) {
           LocalOutputChannel* output_channel;
           LocalInputChannel* input_channel;
-          std::tie(output_channel, input_channel) = ChannelMgr::create_local_channels();
+          std::tie(output_channel, input_channel) = channel_mgr.create_local_channels();
           task.intermediate_output_channels.push_back(output_channel);
           task.intermediate_input_channels.push_back(input_channel);
         }
@@ -391,7 +510,7 @@ struct DistributedPipelineScheduler {
           for(const WorkerDescriptor& wd : next_stage.get_workers()) {
             int worker_rank = wd.rank();
             int worker_lid  = wd.lid();
-            OutputChannel* output_channel = ChannelMgr::create_output_channel(worker_rank, worker_lid);
+            OutputChannel* output_channel = channel_mgr.create_output_channel(worker_rank, stage_id, local_worker_id, worker_lid);
             task.stage_output_channels.push_back(output_channel);
           }
         }
@@ -399,6 +518,7 @@ struct DistributedPipelineScheduler {
       }
       stage_context_list.push_back(std::move(stageContext));
     }
+    channel_mgr.complete();
   }
 
   void show_tasks() {
@@ -465,8 +585,8 @@ struct Pipeline {
 
   void run() {
     DistributedPipelineScheduler scheduler(outputs);
-    // scheduler.run();
-    // scheduler.join();
+    scheduler.run();
+    scheduler.join();
   }
 };
 
@@ -474,4 +594,4 @@ std::unique_ptr<Pipeline> make_pipeline() {
   return std::make_unique<Pipeline>();
 }
 
-#include "canal_impl.h"
+#include "rivulet_impl.h"

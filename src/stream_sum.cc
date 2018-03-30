@@ -9,7 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#include <canal.h>
+#include <rivulet.h>
 
 using namespace std;
 
@@ -41,7 +41,18 @@ struct ValueToString : public DoFn<WN<double>, string>
   void processElement(ProcessContext& processContext) override {
     WN<double>& elem = processContext.element();
     ostringstream oss;
-    oss << elem.id << " " << elem.e << "\n";
+    oss << "wnid: " << elem.id << "   sum: " << elem.e;
+    string out_element = oss.str();
+    processContext.output(std::move(out_element));
+  }
+};
+
+struct DoubleToString : public DoFn<TS<double>, string>
+{
+  void processElement(ProcessContext& processContext) override {
+    auto& elem = processContext.element();
+    ostringstream oss;
+    oss << "ts = " << elem.ts << "  e = " << elem.e;
     string out_element = oss.str();
     processContext.output(std::move(out_element));
   }
@@ -84,26 +95,29 @@ struct SumFn : public CombineFn<T, T, T> {
 
 int main(int argc, char* argv[]) {
   assert(argc == 3);
-  MPI_Init(NULL, NULL);
+  RV_Init();
 
   char* text_path = argv[1];
   char* output_path = argv[2];
 
   std::unique_ptr<Pipeline> p = make_pipeline();
-  WithDevice(Device::CPU()->all_nodes()->all_sockets()->tasks_per_socket(2));
+  WithDevice(Device::CPU()->all_nodes()->all_sockets()->tasks_per_socket(1));
   PCollection<string>* input = p->apply(TextIO::read()->from(text_path)->set_name("read from file"));
   PCollection<double>* parsed_array = input->apply(ParDo::of(ParseDouble())->set_name("parse to double"));
   PCollection<TS<double>>* ts_parsed_array = parsed_array->apply(ParDo::of(AssignTimestamp<double>())->set_name("assign timestamp"));
   PCollection<WN<double>>* wn_parsed_array = Window::FixedWindows::assign(ts_parsed_array, CPU_GHZ * 1e9);
   PCollection<WN<double>>* wn_parsed_array_shuffled = Shuffle::byWindowId(wn_parsed_array);
+  
+  // PCollection<string>* outputs = wn_parsed_array->apply(ParDo::of(ValueToString())->set_name("to string"));
+  // outputs->apply(TextIO::write()->to(output_path));
 
-  WithDevice(Device::CPU()->all_nodes()->all_sockets()->tasks_per_socket(2));
+  WithDevice(Device::CPU()->all_nodes()->all_sockets()->tasks_per_socket(1));
   PCollection<WN<double>>* wn_parsed_array_reduced = WindowedCombine::globally(wn_parsed_array_shuffled, SumFn<double>(0.0));
   PCollection<string>* outputs = wn_parsed_array_reduced->apply(ParDo::of(ValueToString())->set_name("to string"));
   outputs->apply(TextIO::write()->to(output_path));
 
   p->run();
 
-  MPI_Finalize();
+  RV_Finalize();
   return 0;
 }
