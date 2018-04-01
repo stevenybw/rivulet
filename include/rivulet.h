@@ -304,6 +304,7 @@ struct WorkerDescriptor {
   int socket_id() const { return worker_socket_id; }
 };
 
+// TODO: need a more accurate way to express location
 struct CPUDevice {
   std::set<int> node_set; // ranks to distributed to
   std::set<int> socket_set; // socket to distributed

@@ -6,16 +6,18 @@ struct __attribute__((packed)) Header {
 enum {
   TYPE_STRING = 1,
   TYPE_TS     = 2,
-  TYPE_WN     = 3
+  TYPE_WN     = 3,
+  TYPE_PAIR   = 4,
+  TYPE_MAP    = 5
 };
 
 // Serializers and deserializers
 // TODO inconsistent interface: serialize, stream_deserialize
-template <typename T>
+template <typename T, typename Enabled = void>
 struct Serdes
 {
   // Serialize a C++ object into a given ostringstream
-  static void serialize(ostringstream& oss, T& elem) {
+  static void serialize(ostringstream& oss, const T& elem) {
     cerr << "[Error] Not Implemented Serdes" << endl;
     assert(false);
   }
@@ -27,7 +29,7 @@ struct Serdes
   }
 
   // Serialize a C++ object into an output channel
-  static void stream_serialize(OutputChannel* out, T& elem) {
+  static void stream_serialize(OutputChannel* out, const T& elem) {
     cerr << "[Error] Not Implemented Serdes"
     assert(false);
   }
@@ -37,7 +39,7 @@ struct Serdes
 template <typename T>
 struct Serdes<TS<T>>
 {
-  static void serialize(ostringstream& oss, TS<T>& elem) {
+  static void serialize(ostringstream& oss, const TS<T>& elem) {
     Header header = {TYPE_TS, elem.ts};
     oss.write((const char*) &header, sizeof(header));
     Serdes<T>::serialize(oss, elem.e);
@@ -49,7 +51,7 @@ struct Serdes<TS<T>>
     T elem = Serdes<T>::stream_deserialize(in, true);
     return TS<T>(std::move(elem), ts);
   }
-  static void stream_serialize(OutputChannel* out, TS<T>& elem, bool is_eager) {
+  static void stream_serialize(OutputChannel* out, const TS<T>& elem, bool is_eager) {
     ostringstream oss;
     serialize(oss, elem);
     string result = oss.str();
@@ -60,7 +62,7 @@ struct Serdes<TS<T>>
 template <typename T>
 struct Serdes<WN<T>>
 {
-  static void serialize(ostringstream& oss, WN<T>& elem) {
+  static void serialize(ostringstream& oss, const WN<T>& elem) {
     Header header = {TYPE_WN, elem.id};
     oss.write((const char*) &header, sizeof(header));
     Serdes<T>::serialize(oss, elem.e);
@@ -74,7 +76,7 @@ struct Serdes<WN<T>>
     return WN<T>(std::move(elem), id);
   }
 
-  static void stream_serialize(OutputChannel* out, WN<T>& elem, bool is_eager) {
+  static void stream_serialize(OutputChannel* out, const WN<T>& elem, bool is_eager) {
     ostringstream oss;
     serialize(oss, elem);
     string result = oss.str();
@@ -85,7 +87,7 @@ struct Serdes<WN<T>>
 template <>
 struct Serdes<string>
 {
-  static void serialize(ostringstream& oss, string& elem) {
+  static void serialize(ostringstream& oss, const string& elem) {
     Header header = {TYPE_STRING, elem.size()};
     oss.write((const char*) &header, sizeof(header));
     oss.write(elem.c_str(), elem.size());
@@ -99,7 +101,7 @@ struct Serdes<string>
     return string(str, bytes);
   }
 
-  static void stream_serialize(OutputChannel* out, string& elem, bool is_eager) {
+  static void stream_serialize(OutputChannel* out, const string& elem, bool is_eager) {
     ostringstream oss;
     serialize(oss, elem);
     string result = oss.str();
@@ -107,23 +109,78 @@ struct Serdes<string>
   }
 };
 
-template <>
-struct Serdes<double>
+template <typename KeyT, typename ValueT>
+struct Serdes<pair<KeyT, ValueT>>
 {
-  static void serialize(ostringstream& oss, double& elem) {
-    oss.write((const char*) &elem, sizeof(elem));
+  static void serialize(ostringstream& oss, const pair<KeyT, ValueT>& elem) {
+    Header header = {TYPE_PAIR, 0};
+    oss.write((const char*) &header, sizeof(header));
+    Serdes<KeyT>::serialize(oss, elem.first);
+    Serdes<ValueT>::serialize(oss, elem.second);
   }
 
-  static double stream_deserialize(InputChannel* in, bool sticky = false) {
-    double* ptr = (double*) in->pull(sizeof(double), sticky);
-    return *ptr;
+  static pair<KeyT, ValueT> stream_deserialize(InputChannel* in, bool sticky = false) {
+    Header* buf = (Header*) in->pull(sizeof(Header), sticky);
+    assert(buf->type == TYPE_PAIR);
+    KeyT key = Serdes<KeyT>::stream_deserialize(in, true);
+    ValueT val = Serdes<ValueT>::stream_deserialize(in, true);
+    return make_pair(std::move(key), std::move(val));
   }
 
-  static void stream_serialize(OutputChannel* out, double& elem, bool is_eager) {
+  static void stream_serialize(OutputChannel* out, const pair<KeyT, ValueT>& elem, bool is_eager) {
     ostringstream oss;
     serialize(oss, elem);
     string result = oss.str();
     out->push(result.c_str(), result.size(), is_eager);
+  }
+};
+
+template <typename KeyT, typename ValueT>
+struct Serdes<map<KeyT, ValueT>>
+{
+  static void serialize(ostringstream& oss, const map<KeyT, ValueT>& elem) {
+    Header header = {TYPE_MAP, elem.size()};
+    oss.write((const char*) &header, sizeof(header));
+    for(auto& p : elem) {
+      Serdes<pair<KeyT, ValueT>>::serialize(oss, p);
+    }
+  }
+
+  static map<KeyT, ValueT> stream_deserialize(InputChannel* in, bool sticky = false) {
+    map<KeyT, ValueT> result;
+    Header* buf = (Header*) in->pull(sizeof(Header), sticky);
+    assert(buf->type == TYPE_MAP);
+    size_t num_elem = buf->bytes;
+    for(size_t i=0; i<num_elem; i++) {
+      pair<KeyT, ValueT> val = Serdes<pair<KeyT, ValueT>>::stream_deserialize(in, true);
+      result.emplace(std::move(val));
+    }
+    return result;
+  }
+
+  static void stream_serialize(OutputChannel* out, const map<KeyT, ValueT>& elem, bool is_eager) {
+    ostringstream oss;
+    serialize(oss, elem);
+    string result = oss.str();
+    out->push(result.c_str(), result.size(), is_eager);
+  }
+};
+
+
+template <typename T>
+struct Serdes<T, typename std::enable_if<std::is_fundamental<T>::value>::type>
+{
+  static void serialize(ostringstream& oss, const T& elem) {
+    oss.write((const char*) &elem, sizeof(elem));
+  }
+
+  static T stream_deserialize(InputChannel* in, bool sticky = false) {
+    T* ptr = (T*) in->pull(sizeof(T), sticky);
+    return *ptr;
+  }
+
+  static void stream_serialize(OutputChannel* out, const T& elem, bool is_eager) {
+    out->push((const char*) &elem, sizeof(elem), is_eager);
   }
 };
 
