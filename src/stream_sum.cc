@@ -68,6 +68,24 @@ struct AssignTimestamp : public DoFn<T, TS<T>>
   }
 };
 
+struct GenerateRandomDouble : public GenFn<double>
+{
+  const static uint64_t a = 6364136223846793005LL;
+  const static uint64_t c = 1442695040888963407LL;
+  double min;
+  double max;
+  uint64_t mmix_state;
+  GenerateRandomDouble(const GenerateRandomDouble& rhs)=default;
+  GenerateRandomDouble(double min, double max) : min(min), max(max), mmix_state(c) {}
+  void set_instance_id(int instance_id) override {
+    mmix_state += instance_id;
+  }
+  double generateElement() override {
+    mmix_state = a * mmix_state + c;
+    return (max-min) * (1.0 * (mmix_state&0xFFFFFFFFLL) / 0xFFFFFFFFLL) + min;
+  }
+};
+
 template <typename T>
 struct SumFn : public CombineFn<T, T, T> {
   T zero_value;
@@ -102,10 +120,11 @@ int main(int argc, char* argv[]) {
 
   std::unique_ptr<Pipeline> p = make_pipeline();
   WithDevice(Device::CPU()->all_nodes()->all_sockets()->tasks_per_socket(1));
-  PCollection<string>* input = p->apply(TextIO::read()->from(text_path)->set_name("read from file"));
-  PCollection<double>* parsed_array = input->apply(ParDo::of(ParseDouble())->set_name("parse to double"));
+  // PCollection<string>* input = p->apply(TextIO::read()->from(text_path)->set_name("read from file"));
+  // PCollection<double>* parsed_array = input->apply(ParDo::of(ParseDouble())->set_name("parse to double"));
+  PCollection<double>* parsed_array = p->apply(Generator::of(GenerateRandomDouble(0.0, 1.0)));
   PCollection<TS<double>>* ts_parsed_array = parsed_array->apply(ParDo::of(AssignTimestamp<double>())->set_name("assign timestamp"));
-  PCollection<WN<double>>* wn_parsed_array = Window::FixedWindows::assign(ts_parsed_array, CPU_GHZ * 1e9);
+  PCollection<WN<double>>* wn_parsed_array = Window::FixedWindows::assign(ts_parsed_array, CPU_GHZ * 5e8);
   PCollection<WN<double>>* wn_parsed_array_shuffled = Shuffle::byWindowId(wn_parsed_array);
   
   // PCollection<string>* outputs = wn_parsed_array->apply(ParDo::of(ValueToString())->set_name("to string"));
@@ -115,6 +134,10 @@ int main(int argc, char* argv[]) {
   PCollection<WN<double>>* wn_parsed_array_reduced = WindowedCombine::globally(wn_parsed_array_shuffled, SumFn<double>(0.0));
   PCollection<string>* outputs = wn_parsed_array_reduced->apply(ParDo::of(ValueToString())->set_name("to string"));
   outputs->apply(TextIO::write()->to(output_path));
+
+  wn_parsed_array_shuffled->set_next_transform_eager();
+  wn_parsed_array_reduced->set_next_transform_eager();
+  outputs->set_next_transform_eager();
 
   p->run();
 

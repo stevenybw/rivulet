@@ -9,14 +9,24 @@ enum {
   TYPE_WN     = 3
 };
 
+// Serializers and deserializers
+// TODO inconsistent interface: serialize, stream_deserialize
 template <typename T>
 struct Serdes
 {
-  static T stream_deserialize(InputChannel* in) {
+  // Serialize a C++ object into a given ostringstream
+  static void serialize(ostringstream& oss, T& elem) {
     cerr << "[Error] Not Implemented Serdes" << endl;
     assert(false);
   }
 
+  // Deserialize a C++ object from an input channel
+  static T stream_deserialize(InputChannel* in, bool sticky = false) {
+    cerr << "[Error] Not Implemented Serdes" << endl;
+    assert(false);
+  }
+
+  // Serialize a C++ object into an output channel
   static void stream_serialize(OutputChannel* out, T& elem) {
     cerr << "[Error] Not Implemented Serdes"
     assert(false);
@@ -27,67 +37,93 @@ struct Serdes
 template <typename T>
 struct Serdes<TS<T>>
 {
-  static TS<T> stream_deserialize(InputChannel* in) {
-    Header* buf = (Header*) in->pull(sizeof(Header));
+  static void serialize(ostringstream& oss, TS<T>& elem) {
+    Header header = {TYPE_TS, elem.ts};
+    oss.write((const char*) &header, sizeof(header));
+    Serdes<T>::serialize(oss, elem.e);
+  }
+  static TS<T> stream_deserialize(InputChannel* in, bool sticky = false) {
+    Header* buf = (Header*) in->pull(sizeof(Header), sticky);
     assert(buf->type == TYPE_TS);
     size_t ts = buf->bytes;
-    T elem = Serdes<T>::stream_deserialize(in);
+    T elem = Serdes<T>::stream_deserialize(in, true);
     return TS<T>(std::move(elem), ts);
   }
-
-  static void stream_serialize(OutputChannel* out, TS<T>& elem) {
-    Header header = {TYPE_TS, elem.ts};
-    out->push(&header, sizeof(header));
-    Serdes<T>::stream_serialize(out, elem.e);
+  static void stream_serialize(OutputChannel* out, TS<T>& elem, bool is_eager) {
+    ostringstream oss;
+    serialize(oss, elem);
+    string result = oss.str();
+    out->push(result.c_str(), result.size(), is_eager);
   }
 };
 
 template <typename T>
 struct Serdes<WN<T>>
 {
-  static WN<T> stream_deserialize(InputChannel* in) {
-    Header* buf = (Header*) in->pull(sizeof(Header));
+  static void serialize(ostringstream& oss, WN<T>& elem) {
+    Header header = {TYPE_WN, elem.id};
+    oss.write((const char*) &header, sizeof(header));
+    Serdes<T>::serialize(oss, elem.e);
+  }
+
+  static WN<T> stream_deserialize(InputChannel* in, bool sticky = false) {
+    Header* buf = (Header*) in->pull(sizeof(Header), sticky);
     assert(buf->type == TYPE_WN);
     size_t id = buf->bytes;
-    T elem = Serdes<T>::stream_deserialize(in);
+    T elem = Serdes<T>::stream_deserialize(in, true);
     return WN<T>(std::move(elem), id);
   }
 
-  static void stream_serialize(OutputChannel* out, WN<T>& elem) {
-    Header header = {TYPE_WN, elem.id};
-    out->push(&header, sizeof(header));
-    Serdes<T>::stream_serialize(out, elem.e);
+  static void stream_serialize(OutputChannel* out, WN<T>& elem, bool is_eager) {
+    ostringstream oss;
+    serialize(oss, elem);
+    string result = oss.str();
+    out->push(result.c_str(), result.size(), is_eager);
   }
 };
 
 template <>
 struct Serdes<string>
 {
-  static string stream_deserialize(InputChannel* in) {
-    Header* buf = (Header*) in->pull(sizeof(Header));
+  static void serialize(ostringstream& oss, string& elem) {
+    Header header = {TYPE_STRING, elem.size()};
+    oss.write((const char*) &header, sizeof(header));
+    oss.write(elem.c_str(), elem.size());
+  }
+
+  static string stream_deserialize(InputChannel* in, bool sticky = false) {
+    Header* buf = (Header*) in->pull(sizeof(Header), sticky);
     assert(buf->type == TYPE_STRING);
     size_t bytes = buf->bytes;
-    char* str = (char*) in->pull(bytes);
+    char* str = (char*) in->pull(bytes, true);
     return string(str, bytes);
   }
 
-  static void stream_serialize(OutputChannel* out, string& elem) {
-    Header header = {TYPE_STRING, elem.size()};
-    out->push(&header, sizeof(header));
-    out->push(elem.c_str(), elem.size());
+  static void stream_serialize(OutputChannel* out, string& elem, bool is_eager) {
+    ostringstream oss;
+    serialize(oss, elem);
+    string result = oss.str();
+    out->push(result.c_str(), result.size(), is_eager);
   }
 };
 
 template <>
 struct Serdes<double>
 {
-  static double stream_deserialize(InputChannel* in) {
-    double* ptr = (double*) in->pull(sizeof(double));
+  static void serialize(ostringstream& oss, double& elem) {
+    oss.write((const char*) &elem, sizeof(elem));
+  }
+
+  static double stream_deserialize(InputChannel* in, bool sticky = false) {
+    double* ptr = (double*) in->pull(sizeof(double), sticky);
     return *ptr;
   }
 
-  static void stream_serialize(OutputChannel* out, double& elem) {
-    out->push(&elem, sizeof(double));
+  static void stream_serialize(OutputChannel* out, double& elem, bool is_eager) {
+    ostringstream oss;
+    serialize(oss, elem);
+    string result = oss.str();
+    out->push(result.c_str(), result.size(), is_eager);
   }
 };
 
@@ -99,15 +135,28 @@ struct DoFn {
   struct ProcessContext {
     InputT&        _element;
     OutputChannel* _output_channel;
-    ProcessContext(InputT& element, OutputChannel* output_channel) : _element(element), _output_channel(output_channel) {}
+    int            _is_eager;
+    ProcessContext(InputT& element, OutputChannel* output_channel, bool is_eager) : _element(element), _output_channel(output_channel), _is_eager(is_eager) {}
     
     InputT& element() { return _element; }
 
     void output(OutputT&& output_element) {
-      Serdes<OutputT>::stream_serialize(_output_channel, output_element);
+      Serdes<OutputT>::stream_serialize(_output_channel, output_element, this->_is_eager);
     }
   };
   virtual void processElement(ProcessContext& processContext)=0;
+};
+
+// Used in Generator::of
+template <typename OutputT>
+struct GenFn {
+  typedef OutputT OutputType;
+
+  // Generate an object
+  virtual OutputT generateElement()=0;
+
+  // Set the instance id of this generate functor
+  virtual void set_instance_id(int instance_id)=0;
 };
 
 struct ParDo {
@@ -141,7 +190,7 @@ struct ParDo {
       try {
         while(true) {
           InputT in_element = Serdes<InputT>::stream_deserialize(in);
-          typename DoFnType::ProcessContext pc(in_element, out);
+          typename DoFnType::ProcessContext pc(in_element, out, this->is_eager);
           do_fn.processElement(pc);
         }
       } catch (ChannelClosedException& e) {
@@ -154,6 +203,53 @@ struct ParDo {
   template <typename DoFnType>
   static ParDoTransform<DoFnType>* of(const DoFnType& do_fn) {
     return new ParDoTransform<DoFnType>(do_fn);
+  }
+};
+
+struct Generator
+{
+  template <typename GenFnType>
+  struct GeneratorTransform : public TaggedPTransform<PCollectionInput, typename GenFnType::OutputType>
+  {
+    using OutputT = typename GenFnType::OutputType;
+
+    GenFnType gen_fn;
+    GeneratorTransform(const GenFnType& gen_fn) : gen_fn(gen_fn) {}
+
+    string type_name() override { return "GeneratorTransform"; }
+    bool is_elementwise() override { return true; }
+    bool is_shuffle() override { return false; }
+
+    PTInstance* create_instance(int instance_id) override {
+      PTInstance* instance = new PTInstance;
+      instance->instance_id = instance_id;
+      instance->ptransform = this;
+      GenFnType* curr_gen_fn = new GenFnType(gen_fn);
+      curr_gen_fn->set_instance_id(instance_id);
+      instance->state = curr_gen_fn;
+
+      return instance;
+    }
+
+    void execute(const InputChannelList& inputs, const OutputChannelList& outputs, void* state) override {
+      GenFnType* curr_gen_fn = (GenFnType*) state;
+      assert(inputs.size() == 0);
+      assert(outputs.size() == 1);
+      OutputChannel* out = outputs[0];
+      try {
+        while(true) {
+          OutputT out_element = curr_gen_fn->generateElement();
+          Serdes<OutputT>::stream_serialize(out, out_element, this->is_eager);
+        }
+      } catch (ChannelClosedException& e) {
+      }
+      out->close();
+    }
+  };
+
+  template <typename GenFnType>
+  static GeneratorTransform<GenFnType>* of(const GenFnType& gen_fn) {
+    return new GeneratorTransform<GenFnType>(gen_fn);
   }
 };
 
@@ -184,8 +280,8 @@ struct Shuffle
         while (true) {
           InputT in_element = Serdes<InputT>::stream_deserialize(in);
           int dest = (in_element.id) % num_outputs;
-          // printf("!!  %d send to %d\n", ((PTInstance*)state)->instance_id, dest);
-          Serdes<InputT>::stream_serialize(outputs[dest], in_element);
+          Serdes<InputT>::stream_serialize(outputs[dest], in_element, this->is_eager);
+          // printf("stage %d transform %d(Shuffle) task %d> push to %d\n", tl_stage_id, tl_transform_id, tl_task_id, dest);
         }
       } catch (ChannelClosedException& e) {
         assert(in->eos());
@@ -249,7 +345,7 @@ struct TextIO {
       string line;
       std::ifstream& fin = st->fin;
       while (std::getline(fin, line)) {
-        Serdes<string>::stream_serialize(out, line);
+        Serdes<string>::stream_serialize(out, line, this->is_eager);
       }
       assert(!fin);
       out->close();
@@ -293,6 +389,7 @@ struct TextIO {
       try {
         while (true) {
           string in_element = Serdes<string>::stream_deserialize(in);
+          printf("stage %d transform %d(Combine) task %d> write %s\n", tl_stage_id, tl_transform_id, tl_task_id, in_element.c_str());
           fout << in_element << endl;
         }
       } catch (ChannelClosedException& ex) {
@@ -341,7 +438,7 @@ struct Window
             TS<T> in_element = Serdes<TS<T>>::stream_deserialize(in);
             uint64_t ts = in_element.ts;
             WN<T> out_element(std::move(in_element.e), ts / window_size);
-            Serdes<WN<T>>::stream_serialize(out, out_element);
+            Serdes<WN<T>>::stream_serialize(out, out_element, this->is_eager);
           }
         } catch (ChannelClosedException& e) {
           assert(in->eos());
@@ -370,7 +467,6 @@ struct CombineFn {
   virtual OutT  extractOutput(AccT* accumulator)=0;
 };
 
-// Here we assume strict ordering, thus for each source, the window id mono-increase
 // Aggregate each window and emit the result into subsequent transforms. This is 
 // N->1  transform
 struct WindowedCombine
@@ -378,7 +474,10 @@ struct WindowedCombine
   template <typename CombineFnType, typename InT, typename OutT>
   struct WindowedCombineTransform : public TaggedPTransform<WN<InT>, WN<OutT>>
   {
+    // num_windows must be a prime number...
+    const static uint64_t num_windows = 3;
     CombineFnType combine_fn;
+
     WindowedCombineTransform(const CombineFnType& combine_fn) : combine_fn(combine_fn) {}
 
     string type_name() override { return "WindowedCombineTransform"; }
@@ -389,65 +488,53 @@ struct WindowedCombine
       PTInstance* pti = new PTInstance;
       pti->instance_id = instance_id;
       pti->ptransform  = this;
-      pti->state       = NULL;
+      pti->state       = pti;
       return pti;
     }
 
     void execute (const InputChannelList& inputs, const OutputChannelList& outputs, void* state) override {
+      PTInstance* pti = (PTInstance*) state;
+      int instance_id = pti->instance_id;
+
+      typename CombineFnType::AccumulatorType accumulator_list[num_windows];
+      uint64_t wnid_list[num_windows];
+      for(int i=0; i<num_windows; i++) {
+        combine_fn.resetAccumulator(&accumulator_list[i]);
+        wnid_list[i] = (uint64_t) -1;
+      }
+
       assert(outputs.size() == 1);
       OutputChannel* out = outputs[0];
-      int num_inputs = inputs.size();
-      bool* input_valid_list = new bool[num_inputs];
-      WN<InT>* staged_inputs = new WN<InT>[num_inputs];
-      int closed_inputs = 0;
-      uint64_t curr_wnid = (uint64_t) -1;
-      for(int i=0; i<num_inputs; i++) {
-        try {
-          staged_inputs[i] = std::move(Serdes<WN<InT>>::stream_deserialize(inputs[i]));
-          input_valid_list[i] = true;
-          curr_wnid = min(curr_wnid, staged_inputs[i].id);
-        } catch (ChannelClosedException& e) {
-          assert(inputs[i]->eos());
-          input_valid_list[i] = false;
-          closed_inputs++;
-        }
-      }
-      if (closed_inputs < num_inputs) {
-        typename CombineFnType::AccumulatorType* curr_acc = combine_fn.createAccumulator();
-        while (closed_inputs < num_inputs) {
-          uint64_t min_wnid = (uint64_t)-1;
-          for (int i=0; i<num_inputs; i++) {
-            if (input_valid_list[i] && (staged_inputs[i].id == curr_wnid)) {
-              // printf("received from %d, wnid = %llu, val = %lf\n", i, staged_inputs[i].id, staged_inputs[i].e);
-              // WN<InT> in_element = std::move(staged_inputs[i]);
-              combine_fn.addInput(curr_acc, staged_inputs[i].e);
-              min_wnid = min(min_wnid, staged_inputs[i].id);
-              try {
-                staged_inputs[i] = Serdes<WN<InT>>::stream_deserialize(inputs[i]);
-              } catch (ChannelClosedException& e) {
-                // printf("CLOSED %d\n", i);
-                assert(inputs[i]->eos());
-                input_valid_list[i] = false;
-                closed_inputs++;
-              }
-            } else if (input_valid_list[i]) {
-              min_wnid = min(min_wnid, staged_inputs[i].id);
+      AggregatedInputChannel aggregated_in(inputs);
+      try {
+        while(true) {
+          // fprintf(stderr, "%d> try receive\n", instance_id);
+          WN<InT> in_element = Serdes<WN<InT>>::stream_deserialize(&aggregated_in);
+          // fprintf(stderr, "%d> received wnid = %llu\n", instance_id, in_element.id);
+          uint64_t wnid = in_element.id;
+          uint64_t idx  = wnid % num_windows;
+          if (wnid_list[idx] == wnid) {
+            combine_fn.addInput(&accumulator_list[idx], in_element.e);
+          } else {
+            if (wnid_list[idx] != (uint64_t)-1) {
+              WN<OutT> out_element(std::move(combine_fn.extractOutput(&accumulator_list[idx])), wnid_list[idx]);
+              // printf("stage %d transform %d(Combine) task %d> push the resulf of wnid %d\n", tl_stage_id, tl_transform_id, tl_task_id, out_element.id);
+              Serdes<WN<OutT>>::stream_serialize(out, out_element, this->is_eager);
             }
-          }
-          assert(min_wnid >= curr_wnid);
-          if (min_wnid > curr_wnid) {
-            WN<OutT> out_element(std::move(combine_fn.extractOutput(curr_acc)), curr_wnid);
-            Serdes<WN<OutT>>::stream_serialize(out, out_element);
-            curr_wnid = min_wnid;
-            combine_fn.resetAccumulator(curr_acc);
+            wnid_list[idx] = wnid;
+            combine_fn.resetAccumulator(&accumulator_list[idx]);
+            combine_fn.addInput(&accumulator_list[idx], in_element.e);
           }
         }
-        assert(closed_inputs == num_inputs);
-        WN<OutT> out_element(std::move(combine_fn.extractOutput(curr_acc)), curr_wnid);
-        Serdes<WN<OutT>>::stream_serialize(out, out_element);
-        combine_fn.resetAccumulator(curr_acc);
+      } catch (ChannelClosedException e) {
+        assert(aggregated_in.eos());
+        for(int idx=0; idx<num_windows; idx++) {
+          WN<OutT> out_element(std::move(combine_fn.extractOutput(&accumulator_list[idx])), wnid_list[idx]);
+          Serdes<WN<OutT>>::stream_serialize(out, out_element, this->is_eager);
+          wnid_list[idx] = -1;
+          combine_fn.resetAccumulator(&accumulator_list[idx]);
+        }
       }
-      out->close();
     }
   };
 

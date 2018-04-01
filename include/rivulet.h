@@ -20,6 +20,10 @@ using Thread = std::thread;
 
 using namespace std;
 
+thread_local int tl_stage_id = -1;
+thread_local int tl_task_id = -1;
+thread_local int tl_transform_id = -1;
+
 // Raised if the channel being closed while pulling
 struct ChannelClosedException : public std::exception {
   const char* what () const throw () {
@@ -30,13 +34,91 @@ struct ChannelClosedException : public std::exception {
 struct InputChannel
 {
   virtual bool eos()=0;
-  virtual const void* pull(size_t bytes)=0;
+
+  // TODO: ad-hoc trick here
+  // is_sticky is a trick for the fact that AggregatedInputChannel may receive atoms from 
+  // multiple sources, but some deserializer (like string) requires multiple atoms received 
+  // continguously. Set is_sticky true to fetch from the same source of last pull
+  virtual const void* pull(size_t bytes, bool is_sticky)=0;
+
+  // poll = non-blocking pull: return NULL if not available
+  virtual const void* poll(size_t bytes)=0;
 };
 
 struct OutputChannel
 {
   virtual void close()=0;
-  virtual void push(const void* data, size_t bytes)=0;
+
+  // TODO: ad-hoc trick here
+  // Setting is_eager true to flush after each write. This is important if data rate
+  // is too low and buffering may cause high latency.
+  virtual void push(const void* data, size_t bytes, bool is_eager)=0;
+};
+
+using InputChannelList = std::vector<InputChannel*>;
+using OutputChannelList = std::vector<OutputChannel*>;
+
+// AggregatedInputChannel
+//   Aggregate a list of input channels, and form a single input channel.
+struct AggregatedInputChannel : public InputChannel
+{
+  InputChannelList input_channel_list;
+  int   last_pos;
+  int   num_inputs;
+  int   closed_inputs;
+  bool* input_valid_list;
+
+  AggregatedInputChannel(const InputChannelList& input_channel_list) : input_channel_list(input_channel_list) {
+    last_pos = 0;
+    num_inputs = input_channel_list.size();
+    assert(num_inputs >= 1);
+    closed_inputs = 0;
+    input_valid_list = new bool[num_inputs];
+    for(int i=0; i<num_inputs; i++) {
+      input_valid_list[i] = true;
+    }
+  }
+
+  bool eos() override {
+    return closed_inputs == num_inputs;
+  }
+
+  const void* pull(size_t bytes, bool sticky) override {
+    if (!sticky) {
+      while (true) {
+        last_pos++;
+        if (last_pos == num_inputs) {
+          last_pos = 0;
+        }
+        if (input_valid_list[last_pos]) {
+          const void* result = input_channel_list[last_pos]->poll(bytes);
+          if (result != NULL) {
+            // printf("stage %d transform %d task %d> pull from task %d for %llu bytes\n", tl_stage_id, tl_transform_id, tl_task_id, last_pos, bytes);
+            return result;
+          }
+          if (input_channel_list[last_pos]->eos()) {
+            input_valid_list[last_pos] = false;
+            closed_inputs++;
+          }
+        }
+        if (closed_inputs == num_inputs) {
+          throw ChannelClosedException();
+        }
+      }
+    } else {
+      try {
+        const void* result = input_channel_list[last_pos]->pull(bytes, true);
+        // printf("stage %d transform %d task %d> pull from task %d for %llu bytes (sticky)\n", tl_stage_id, tl_transform_id, tl_task_id, last_pos, bytes);
+        return result;
+      } catch (ChannelClosedException& e) {
+        assert(false);
+      }
+    }
+  }
+
+  const void* poll(size_t bytes) override {
+    assert(false);
+  }
 };
 
 const size_t MAX_PULL_BYTES = 128*1024;
@@ -52,7 +134,7 @@ struct LocalInputChannel : public InputChannel
 
   LocalInputChannel(LocalChannelType channel) : channel(channel), used_bytes(0), total_bytes(0) {}
 
-  const void* pull(size_t bytes) override {
+  const void* pull(size_t bytes, bool sticky) override {
     assert(bytes <= MAX_PULL_BYTES);
     if (total_bytes - used_bytes >= bytes) {
       void* result = &input_buffer[used_bytes];
@@ -76,6 +158,27 @@ struct LocalInputChannel : public InputChannel
     }
   }
 
+  const void* poll(size_t bytes) override {
+    assert(bytes <= MAX_PULL_BYTES);
+
+    if (total_bytes - used_bytes < bytes) {
+      memmove(&input_buffer[0], &input_buffer[used_bytes], total_bytes - used_bytes);
+      total_bytes = total_bytes - used_bytes;
+      used_bytes  = 0;
+      channel.poll([this](const char* data, size_t data_bytes) {
+        memcpy(&input_buffer[total_bytes], data, data_bytes);
+        total_bytes += data_bytes;
+      });
+    }
+    if (total_bytes - used_bytes >= bytes) {
+      void* result = &input_buffer[used_bytes];
+      used_bytes += bytes;
+      return result;
+    } else {
+      return NULL;
+    }
+  }
+
   bool eos() override {
     return channel.eos();
   }
@@ -87,8 +190,11 @@ struct LocalOutputChannel : public OutputChannel
 
   LocalOutputChannel(LocalChannelType channel) : channel(channel) { }
 
-  void push(const void* data, size_t bytes) override {
+  void push(const void* data, size_t bytes, bool is_eager) override {
     channel.push((const char*) data, bytes);
+    if (is_eager) {
+      channel.flush_and_wait();
+    }
   }
 
   void close() override {
@@ -170,9 +276,6 @@ void RV_Finalize()
   MPI_Finalize();
 }
 
-using InputChannelList = std::vector<InputChannel*>;
-using OutputChannelList = std::vector<OutputChannel*>;
-
 // using ChannelList = std::vector<Channel*>;
 
 template <typename T>
@@ -252,7 +355,8 @@ struct PTInstance {
 struct PTransform {
   string     name;
   CPUDevice* device;
-  PTransform() : name(""), device(g_curr_device) {}
+  bool       is_eager;
+  PTransform() : name(""), device(g_curr_device), is_eager(false) {}
   string display_name() { return name + " @ " + type_name(); }
 
   virtual string type_name()=0;
@@ -297,6 +401,12 @@ struct PCollection : public PCollectionBase
     entry.via_transform = pt;
     outputs.push_back(entry);
     return result;
+  }
+
+  void set_next_transform_eager() {
+    for (CollectionOutputEntry& entry : outputs) {
+      entry.via_transform->is_eager = true;
+    }
   }
 };
 
@@ -382,6 +492,9 @@ struct DistributedPipelineScheduler {
       } else {
         for(size_t i=0; i<transform_instance_list.size(); i++) {
           worker_thread_list.push_back(std::move(Thread([this, i](){
+            tl_stage_id = stage_id;
+            tl_transform_id = i;
+            tl_task_id = id;
             if (socket_id > 0) {
               numa_run_on_node(socket_id);
             }
