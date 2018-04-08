@@ -1,6 +1,8 @@
 #ifndef RIVULET_CHANNEL_H
 #define RIVULET_CHANNEL_H
 
+#include <immintrin.h>
+
 #include "util.h"
 
 /*

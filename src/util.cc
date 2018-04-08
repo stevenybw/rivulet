@@ -35,10 +35,10 @@ bool is_power_of_2(uint64_t num) {
 void* malloc_pinned(size_t size) {
   // !NOTE: use memalign to allocate 256-bytes aligned buffer
   void* ptr = am_memalign(4096, size);
-  if (mlock(ptr, size)<0) {
-    perror("mlock failed");
-    assert(false);
-  }
+  // if (mlock(ptr, size)<0) {
+  //   perror("mlock failed");
+  //   assert(false);
+  // }
   return ptr;
 }
 

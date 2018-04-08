@@ -3,6 +3,7 @@
 
 #include "common.h"
 
+#include <immintrin.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -12,6 +13,7 @@
 
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <string>
 
 using namespace std;
@@ -51,6 +53,27 @@ struct ApproxMod {
 };
 
 using DefaultApproxMod = ApproxMod<128>;
+
+struct ConfigFile 
+{
+  map<string, string> _config;
+  ConfigFile(string config_path) {
+    ifstream fin(config_path);
+    if (!fin) {
+      cerr << "Failed to open config file: " << config_path << endl;
+      assert(false);
+    }
+    string key, equal, value;
+    while (fin >> key >> equal >> value) {
+      assert(equal == "=");
+      _config[key] = value;
+    }
+  }
+  uint64_t get_uint64(string key) {
+    assert(_config.find(key) != _config.end());
+    return stoul(_config[key]);
+  }
+};
 
 // Configuration Parameters for Launching
 struct LaunchConfig {

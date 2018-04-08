@@ -21,14 +21,14 @@
 
 #include <signal.h>
 
-#include "graph.h"
+#include "driver.h"
 #include "graph_context.h"
-#include "util.h"
 
 using namespace std;
 
 int main(int argc, char* argv[]) {
-  int required_level = MPI_THREAD_MULTIPLE;
+  uint64_t duration;
+  int required_level = MPI_THREAD_SERIALIZED;
   int provided_level;
   MPI_Init_thread(NULL, NULL, required_level, &provided_level);
   assert(provided_level >= required_level);
@@ -36,16 +36,12 @@ int main(int argc, char* argv[]) {
   int rank, nprocs;
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
   MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
-  if (nprocs == 1) {
-    g_group_size = 1;
-  } else {
-    g_group_size = g_num_sockets;
-  }
+
   g_rank = rank;
   g_nprocs = nprocs;
 
-  if (argc < 7) {
-    cerr << "Usage: " << argv[0] << " <graph_path> <graph_t_path> <run_mode> <num_iters> <num_threads> <chunk_size>" << endl;
+  if (argc < 8) {
+    cerr << "Usage: " << argv[0] << " <graph_path> <graph_t_path> <run_mode> <num_iters> <num_threads> <chunk_size> <tmp_path>" << endl;
     return -1;
   }
   string graph_path = argv[1];
@@ -54,6 +50,7 @@ int main(int argc, char* argv[]) {
   int num_iters = atoi(argv[4]);
   int num_threads = atoi(argv[5]);
   uint32_t chunk_size = atoi(argv[6]);
+  string tmp_path = argv[7];
 
   if (rank == 0) {
     cout << "  graph_path = " << graph_path << endl;
@@ -77,23 +74,37 @@ int main(int argc, char* argv[]) {
     return -1;
   }
 
-  // omp_set_num_threads(num_threads);
-
-  Graph<uint32_t, uint64_t> graph;
-  graph.load_csr(graph_path);
-  Graph<uint32_t, uint64_t> graph_t;
-  graph_t.load_csr(graph_t_path);
-  assert(graph._num_nodes == graph_t._num_nodes);
-  assert(graph._num_edges == graph_t._num_edges);
+  Driver* driver = new Driver(MPI_COMM_WORLD, new ObjectPool(tmp_path));
+  REGION_BEGIN();
+  ConfigFile config(graph_path + ".config");
+  uint64_t total_num_nodes = config.get_uint64("total_num_nodes");
+  uint64_t total_num_edges = config.get_uint64("total_num_edges");
+  GArray<uint32_t>* edges = driver->load_array<uint32_t>(graph_path + ".edges", ObjectMode(UNIFORMITY_UNIFORM_OBJECT, WRITABILITY_READ_ONLY));
+  GArray<uint64_t>* index = driver->load_array<uint64_t>(graph_path + ".index", ObjectMode(UNIFORMITY_UNIFORM_OBJECT, WRITABILITY_READ_ONLY));
+  assert(edges->size() == total_num_edges);
+  assert(index->size() == (total_num_nodes+1));
+  GArray<uint32_t>* edges_t = driver->load_array<uint32_t>(graph_t_path + ".edges", ObjectMode(UNIFORMITY_UNIFORM_OBJECT, WRITABILITY_READ_ONLY));
+  GArray<uint64_t>* index_t = driver->load_array<uint64_t>(graph_t_path + ".index", ObjectMode(UNIFORMITY_UNIFORM_OBJECT, WRITABILITY_READ_ONLY));
+  assert(edges_t->size() == total_num_edges);
+  assert(index_t->size() == (total_num_nodes+1));
+  SharedGraph<uint32_t, uint64_t> graph(rank, nprocs, edges, index);
+  SharedGraph<uint32_t, uint64_t> graph_t(rank, nprocs, edges_t, index_t);
+  assert(graph.total_num_nodes() == total_num_nodes);
+  assert(graph.total_num_edges() == total_num_edges);
+  assert(graph.total_num_nodes() == graph_t.total_num_nodes());
+  assert(graph.total_num_edges() == graph_t.total_num_edges());
+  REGION_END("Graph Load");
 
   if (rank == 0) {
-    cout << "  graph_num_nodes = " << graph._num_nodes << endl;
-    cout << "  graph_num_edges = " << graph._num_edges << endl;
+    printf("  total_num_nodes = %llu\n", total_num_nodes);
+    printf("  total_num_edges = %llu\n", total_num_edges);
   }
 
-  size_t num_nodes = graph.num_local_nodes();
+  size_t num_nodes = graph.local_num_nodes();
+  LINES;
   double* src = (double*) malloc_pinned(num_nodes * sizeof(double));
   double* next_val = (double*) malloc_pinned(num_nodes * sizeof(double));
+  LINES;
 
   for (size_t i=0; i<num_nodes; i++) {
     src[i] = 0.0;
@@ -102,7 +113,7 @@ int main(int argc, char* argv[]) {
 
   LaunchConfig launch_config;
   launch_config.load_from_config_file("launch.conf");
-  launch_config.distributed_round_robin_socket(rank, g_num_sockets);
+  // launch_config.distributed_round_robin_socket(rank, g_num_sockets);
   if (rank == 0) {
     launch_config.show();
   }
@@ -115,7 +126,7 @@ int main(int argc, char* argv[]) {
     
     #pragma omp parallel for // schedule(dynamic, chunk_size)
     for(uint32_t i=0; i<num_nodes; i++) {
-      src[i] = alpha * next_val[i] / (double)(graph.get_index_from_llid(i+1) - graph.get_index_from_llid(i));
+      src[i] = alpha * next_val[i] / (double)(graph.get_index_from_lid(i+1) - graph.get_index_from_lid(i));
       next_val[i] = 1.0 - alpha;
     }
 
