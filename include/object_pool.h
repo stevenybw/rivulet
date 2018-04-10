@@ -20,7 +20,7 @@ struct ObjectPool
 
   string gen_anonymous_name() {
     char fname[256];
-    snprintf(fname, 256, "%s_%016llx.bin", anonymous_prefix.c_str(), _rand_dist(_rand_gen));
+    snprintf(fname, 256, "%s_%016lx.bin", anonymous_prefix.c_str(), _rand_dist(_rand_gen));
     return string(fname);
   }
 
@@ -36,7 +36,8 @@ struct ObjectPool
       is_anonymous = false;
     }
     MappedFile file;
-    file.create(obj_name.c_str(), capacity, ACCESS_PATTERN_NORMAL);
+    file.create(obj_name.c_str(), capacity);
+    file.open(obj_name.c_str(), FILE_MODE_READ_WRITE, ACCESS_PATTERN_NORMAL);
     Object* obj = new Object([file]() mutable {file.close();});
     obj->is_anonymous = is_anonymous;
     obj->name = obj_name;

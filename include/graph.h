@@ -10,7 +10,7 @@
 #include "util.h"
 #include "garray.h"
 
-// #define MPI_DEBUG
+#define MPI_DEBUG
 
 #ifdef MPI_DEBUG
 #define assert(COND) do{if(!(COND)) {printf("ASSERTION VIOLATED, PROCESS pid = %d PAUSED\n", getpid()); while(1);}}while(0)
@@ -48,8 +48,9 @@ const double alpha = 0.15;
 
 // const uint64_t g_chunk_size = 64;
 
-int g_group_size = 4;
-int g_num_sockets = 4;
+// int g_group_size = 4;
+// int g_num_sockets = 4;
+int g_group_size = 1;
 int g_rank = 0;
 int g_nprocs = 1;
 
@@ -65,6 +66,10 @@ int g_nprocs = 1;
 // typically, NodeT=uint32_t, IndexT=uint64_t
 template <typename NodeT, typename IndexT>
 struct SharedGraph {
+  using NodeType = NodeT;
+  using IndexType = IndexT;
+  static const char* CLASS_NAME() { return "SharedGraph"; }
+
   // vid (global) -> lid (node) -> llid (rank)
   int      _rank;
   int      _nprocs;
@@ -125,10 +130,12 @@ struct SharedGraph {
     return _index[_end_vid] - _index[_begin_vid];
   }
 
+  // get the starting vid for my partition
   uint64_t get_begin_vid() const {
     return _begin_vid;
   }
 
+  // get the ending vid for my partition
   uint64_t get_end_vid() const {
     return _end_vid;
   }
@@ -255,10 +262,15 @@ struct SharedGraph {
 template <typename NodeT, typename IndexT, size_t partition_id_bits>
 struct DistributedGraph
 {
+  using NodeType = NodeT;
+  using IndexType = IndexT;
+  static const char* CLASS_NAME() { return "DistributedGraph"; }
+
   const static size_t partition_offset_bits = 8 * sizeof(NodeT) - partition_id_bits;
   const static size_t partition_offset_mask = (1LL << partition_offset_bits) - 1;
   const static size_t max_num_partitions = (1LL << partition_id_bits);
 
+  MPI_Comm    _comm;
   int         _rank;
   int         _nprocs;
   uint64_t    _num_edges;
@@ -276,90 +288,79 @@ struct DistributedGraph
   //  assert(false /* not implemented */); 
   //}
 
-  DistributedGraph(int rank, int nprocs, GArray<NodeT>* edges, GArray<IndexT>* index) {
+  DistributedGraph(MPI_Comm comm, GArray<NodeT>* edges, GArray<IndexT>* index) {
     assert(edges->is_separated() == true);
     assert(index->is_separated() == true);
-    // _comm = obj_ctx.get_comm();
-    _rank = rank;
-    _nprocs = nprocs;
+    _comm = comm;
+    MPI_Comm_rank(comm, &_rank);
+    MPI_Comm_size(comm, &_nprocs);
+    assert(_nprocs <= max_num_partitions);
     _num_edges = edges->size();
     _num_nodes = index->size()-1;
     _garr_edges = edges;
     _garr_index = index;
     _edges = edges->data();
     _index = index->data();
+    MPI_Allreduce(&_num_edges, &_total_num_edges, 1, MPI_UNSIGNED_LONG_LONG, MPI_SUM, comm);
+    MPI_Allreduce(&_num_nodes, &_total_num_nodes, 1, MPI_UNSIGNED_LONG_LONG, MPI_SUM, comm);
+  }
+
+  int rank() const { return _rank; }
+
+  int nprocs() const { return _nprocs; }
+
+  uint64_t total_num_nodes() const {
+    return _total_num_nodes;
+  }
+
+  uint64_t total_num_edges() const {
+    return _total_num_edges;
+  }
+
+  uint64_t local_num_nodes() const {
+    return _num_nodes;
+  }
+
+  uint64_t local_num_edges() const {
+    return _num_edges;
+  }
+
+  // get the starting vid for my partition
+  uint64_t get_begin_vid() const {
+    assert(false);
+    // return _begin_vid;
+  }
+
+  // get the ending vid for my partition
+  uint64_t get_end_vid() const {
+    assert(false);
+    //return _end_vid;
+  }
+
+  IndexT get_index_from_vid(uint64_t vid) const {
+    assert(vid & partition_offset_mask <= _num_nodes);
+    return _index[vid & partition_offset_mask];
+  }
+
+  IndexT get_index_from_lid(uint64_t lid) const { 
+    assert(lid <= _num_nodes);
+    return _index[lid];
+  }
+
+  NodeT get_edge_from_index(IndexT index) const {
+    return _edges[index];
+  }
+
+  int get_rank_from_vid(uint64_t vid) const {
+    int pid = vid >> partition_offset_bits;
+    assert(pid < _nprocs);
+    return pid;
+  }
+
+  uint64_t get_lid_from_vid(uint64_t vid) const {
+    uint64_t lid = vid & partition_offset_mask;
+    return lid;
   }
 };
-
-
-// InputNodeIdT: Exposed type for node id
-// IndexT: Exposed type for 
-// partition_id_bits: number of partition id bits in real representation
-// template <typename InputNodeIdT, typename RealNodeIdT, typename IndexT, size_t partition_id_bits, size_t chunk_size>
-// struct DistributedGraph
-// {
-//   enum {PHASE_READ_ONLY, PHASE_MODIFY_ONLY};
-//   // number of partition offset bits in real representation
-//   const static size_t partition_offset_bits = 8 * sizeof(RealNodeIdT) - partition_id_bits;
-//   const static size_t partition_offset_mask = (1LL << partition_offset_bits) - 1;
-// 
-//   // max number of paticipating partitions
-//   const static size_t max_num_partitions = (1LL << partition_id_bits);
-// 
-//   struct NodeId {
-//     RealNodeIdT data;
-// 
-//     NodeId (uint32_t pid, uint32_t poffset) : data((pid << partition_offset_bits) + poffset) { }
-// 
-//     uint32_t partition_id() { return data >> partition_offset_bits; }
-//     uint32_t partition_offset() { return data & partition_offset_mask; }
-//   };
-// 
-//   int      state;
-//   std::mutex mu;
-//   MPI_Comm comm;
-//   int      rank;
-//   int      nprocs;
-//   string   namespace_prefix;
-//   uint64_t total_num_nodes;
-//   uint64_t total_num_edges;
-//   uint64_t local_num_nodes;
-//   uint64_t local_num_edges;
-//   IndexT*  index_list;
-//   NodeId*  node_list;
-// 
-//   DistributedGraph(); // TODO
-// 
-//   static NodeId address_resolve(InputNodeIdT vid, int nprocs) {
-//     int pid = (vid / chunk_size) % nprocs;
-//     uint32_t cid = (vid / chunk_size) / nprocs;
-//     uint32_t coff = vid % chunk_size;
-//     uint32_t poffset = cid * chunk_size + coff;
-//     return NodeId(pid, poffset);
-//   }
-// 
-//   void check() {
-//     assert(nprocs <= max_num_partitions);
-//     assert(partition_id_bits < 8 * sizeof(RealNodeIdT));
-//     assert(sizeof(NodeId) == sizeof(RealNodeIdT));
-//   }
-// 
-//   void begin() {
-//     state = PHASE_READ_ONLY;
-// 
-//   }
-// 
-//   // create a new vertex and return its id.
-//   void add_edge(GraphContext& ctx, InputNodeIdT src, InputNodeIdT dst) {
-//     NodeId x(src);
-//     NodeId y(dst);
-//     ctx.issue_add_edge(x, y);
-//   }
-// 
-//   // collective operation: exchange & update
-//   void commit(GraphContext& ctx) {
-//     ctx.commit();
-//   }
-// };
 
 #endif

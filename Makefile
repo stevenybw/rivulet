@@ -1,5 +1,5 @@
-EXECUTABLES := page_rank
-#EXECUTABLES := stream_wordcount stream_sum page_rank graph_preprocess
+EXECUTABLES := page_rank_distributed
+#EXECUTABLES := stream_wordcount stream_sum page_rank graph_preprocess page_rank_distributed
 
 HEADERS := include/rivulet.h include/rivulet_impl.h include/channel.h
 
@@ -15,9 +15,12 @@ stream_sum: $(HEADERS) src/stream_sum.cc
 	mpicxx -g -O2 -Iinclude -std=c++14 -march=native -fopenmp -o stream_sum src/util.cc src/stream_sum.cc -lnuma
 
 graph_preprocess: $(HEADERS) src/graph_preprocess.cc
-	mpicxx -g -O2 -Iinclude -std=c++14 -DUPDATE_CAS -march=native -fopenmp -o graph_preprocess src/util.cc src/graph_preprocess.cc -lnuma
+	mpicxx -g -Wall -O2 -Iinclude -std=c++14 -DUPDATE_CAS -march=native -fopenmp -o graph_preprocess src/util.cc src/ympi_alltoallv.c src/graph_preprocess.cc -lnuma
 
 page_rank: $(HEADERS) src/page_rank.cc
-	mpicxx -g -Wall -O2 -Iinclude -std=c++14 -DUPDATE_CAS -march=native -fopenmp -o page_rank src/util.cc src/page_rank.cc -lnuma
+	mpicxx -g -Wall -O2 -Iinclude -std=c++14 -DUPDATE_CAS -march=native -fopenmp -o page_rank src/util.cc src/ympi_alltoallv.c src/page_rank.cc -lnuma
+
+page_rank_distributed: $(HEADERS) src/page_rank_distributed.cc
+	mpicxx -g -Wall -O2 -Iinclude -std=c++14 -DUPDATE_CAS -march=native -fopenmp -o page_rank_distributed src/util.cc src/ympi_alltoallv.c src/page_rank_distributed.cc -lnuma
 
 .PHONY: all clean

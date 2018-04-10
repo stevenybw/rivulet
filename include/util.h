@@ -4,6 +4,7 @@
 #include "common.h"
 
 #include <immintrin.h>
+#include <mpi.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>

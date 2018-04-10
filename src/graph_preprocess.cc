@@ -5,9 +5,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#include "graph.h"
+#include "driver.h"
 #include "graph_context.h"
-#include "util.h"
 
 using namespace std;
 
@@ -57,7 +56,7 @@ int main(int argc, char* argv[])
 {
   uint64_t duration;
   assert(sizeof(ComposedNodeId) == sizeof(uint32_t));
-  int required_level = MPI_THREAD_MULTIPLE;
+  int required_level = MPI_THREAD_SERIALIZED;
   int provided_level;
   MPI_Init_thread(NULL, NULL, required_level, &provided_level);
   init_debug();
@@ -73,56 +72,77 @@ int main(int argc, char* argv[])
     return -1;
   }
 
-  ObjectPoolContext obj_ctx;
-
   string graph_path = argv[1];
   string output_graph_path = argv[2];
   string anonymous_prefix = argv[3];
 
+  Driver* driver = new Driver(MPI_COMM_WORLD, new ObjectPool(anonymous_prefix));
   REGION_BEGIN();
   ConfigFile config(graph_path + ".config");
   uint64_t total_num_nodes = config.get_uint64("total_num_nodes");
   uint64_t total_num_edges = config.get_uint64("total_num_edges");
-  GArray<uint32_t>* edges = obj_ctx.load_array<uint32_t>(graph_path + ".edges", ObjectMode(UNIFORMITY_UNIFORM_OBJECT, WRITABILITY_READ_ONLY));
-  GArray<uint64_t>* index = obj_ctx.load_array<uint64_t>(graph_path + ".index", ObjectMode(UNIFORMITY_UNIFORM_OBJECT, WRITABILITY_READ_ONLY));
+  GArray<uint32_t>* edges = driver->load_array<uint32_t>(graph_path + ".edges", ObjectMode(UNIFORMITY_UNIFORM_OBJECT, WRITABILITY_READ_ONLY));
+  GArray<uint64_t>* index = driver->load_array<uint64_t>(graph_path + ".index", ObjectMode(UNIFORMITY_UNIFORM_OBJECT, WRITABILITY_READ_ONLY));
   MPI_Barrier(MPI_COMM_WORLD);
-  REGION_END("Load CSR From Disk");
   assert(edges->size() == total_num_edges);
   assert(index->size() == (total_num_nodes+1));
-  Graph<uint32_t, uint64_t>* graph = make_graph_from_csr<uint32_t, uint64_t>(obj_ctx, edges, index);
-  assert(graph->total_num_nodes() == total_num_nodes);
-  assert(graph->total_num_edges() == total_num_edges);
+  SharedGraph<uint32_t, uint64_t> graph(rank, nprocs, edges, index);
+  assert(graph.total_num_nodes() == total_num_nodes);
+  assert(graph.total_num_edges() == total_num_edges);
+  LINES;
+  REGION_END("Graph Load");
   REGION_BEGIN();
-  GArray<pair<uint32_t, uint32_t>>* graph_tuples = graph->to_tuples(obj_ctx, output_graph_path);
+  GArray<pair<uint32_t, uint32_t>>* graph_tuples = driver->to_tuples(graph);
+  LINES;
   REGION_END("Transform CSR To Tuples");
-  delete graph; graph=NULL;
+  // delete graph; graph=NULL;
   delete edges; edges=NULL;
   delete index; index=NULL;
   REGION_BEGIN();
-  GArray<pair<uint32_t, uint32_t>>* graph_tuples_remapped = obj_ctx.map(graph_tuples, RemapNodeIdMapFn(rank, nprocs));
+  RemapNodeIdMapFn remap_fn(rank, nprocs);
+  GArray<pair<uint32_t, uint32_t>>* graph_tuples_remapped = driver->map(graph_tuples, remap_fn);
+  LINES;
   REGION_END("Remap ID For Tuples");
   delete graph_tuples; graph_tuples=NULL;
   REGION_BEGIN();
-  GArray<pair<uint32_t, uint32_t>>* graph_tuples_reparted = obj_ctx.repartition(graph_tuples_remapped, [](pair<uint32_t, uint32_t> edge) {
+  GArray<pair<uint32_t, uint32_t>>* graph_tuples_reparted = driver->repartition(graph_tuples_remapped, [](pair<uint32_t, uint32_t> edge) {
     uint32_t x = edge.first;
     int part_id = ComposedNodeId(x).partition_id();
     return part_id;
   });
+  LINES;
   REGION_END("Repart Tuples");
   delete graph_tuples_remapped; graph_tuples_remapped=NULL;
+
   REGION_BEGIN();
   {
-    pair<uint32_t, uint32_t>* graph_tuples_reparted_arr = graph_tuples_reparted->local_begin();
-    size_t graph_tuples_reparted_ne = gtreparted->local_num_elements();
-    sort(graph_tuples_reparted_arr, graph_tuples_reparted_arr+graph_tuples_reparted_ne, 
+    pair<uint32_t, uint32_t>* graph_tuples_reparted_arr = graph_tuples_reparted->data();
+    size_t graph_tuples_reparted_ne = graph_tuples_reparted->size();
+    my_sort(graph_tuples_reparted_arr, graph_tuples_reparted_arr+graph_tuples_reparted_ne, 
       [](const pair<uint32_t, uint32_t>& lhs, const pair<uint32_t, uint32_t>& rhs) {
-        assert(lhs.first == rhs.first);
-        return lhs.second < rhs.second;
+        if (lhs.first < rhs.first) {
+          return true;
+        } else if (lhs.first == rhs.first && lhs.second < rhs.second) {
+          return true;
+        }
+        return false;
     });
   }
+  LINES;
   REGION_END("Local Sort The Tuples");
-  Graph<uint32_t, uint32_t>* remapped_graph = make_graph_from_tuples<uint32_t, uint64_t>(obj_ctx, graph_tuples_reparted, output_graph_path);
+  REGION_BEGIN();
+  auto csr_result = driver->make_csr_from_tuples<uint32_t, uint64_t>(graph_tuples_reparted, [](uint32_t vid) {
+    int part_id = ComposedNodeId(vid).partition_id();
+    return part_id;
+  }, [](uint32_t vid) {
+    uint32_t offset = ComposedNodeId(vid).partition_offset();
+    return offset;
+  }, output_graph_path);
+  LINES;
+  REGION_END("From Tuple To CSR");
   delete graph_tuples_reparted; graph_tuples_reparted=NULL;
+  delete get<0>(csr_result);
+  delete get<1>(csr_result);
 
   MPI_Finalize();
   return 0;

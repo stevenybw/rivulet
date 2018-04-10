@@ -135,9 +135,11 @@ struct GraphContext {
     importer_num_close_request = new int;
   }
 
-  template <typename NodeT, typename IndexT, typename VertexT, typename UpdateCallback>
-  void edge_map(SharedGraph<NodeT, IndexT>& graph, VertexT* curr_val, VertexT* next_val, uint32_t chunk_size, const UpdateCallback& update_op)
+  template <typename GraphType, typename VertexT, typename UpdateCallback>
+  void edge_map(GraphType& graph, VertexT* curr_val, VertexT* next_val, uint32_t chunk_size, const UpdateCallback& update_op)
   {
+    using NodeT = typename GraphType::NodeType;
+    using IndexT = typename GraphType::IndexType;
     using UpdateRequest = GeneralUpdateRequest<VertexT>;
 
     int rank = graph._rank;
@@ -168,7 +170,7 @@ struct GraphContext {
 
     if (rank == 0) {
       printf("EDGE_MAP BEGIN\n");
-      printf("  graph_type = SharedGraph\n");
+      printf("  graph_type = %s\n", GraphType::CLASS_NAME());
       printf("  total_num_nodes = %llu\n", graph.total_num_nodes());
       printf("  total_num_edges = %llu\n", graph.total_num_edges());
       printf("  channel_bytes = %zu\n", CHANNEL_BYTES);

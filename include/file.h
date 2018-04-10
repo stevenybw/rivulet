@@ -30,15 +30,12 @@ struct MappedFile {
   size_t _bytes;
   void*  _addr;
 
-  bool create(const char* path, size_t bytes, int access_pattern) {
+  bool create(const char* path, size_t bytes) {
     if (access(path, F_OK) != -1) {
       printf("ERROR: Path to be created %s exists\n", path);
       assert(false);
     }
     mode_t mode = S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
-    int mmap_flags = PROT_READ | PROT_WRITE;
-    int mmap_prot = MAP_SHARED;
-
     int fd = ::open(path, O_RDWR | O_CREAT, mode);
     if (fd < 0) {
       cout << "cannot open file " << path;
@@ -48,46 +45,7 @@ struct MappedFile {
       perror("ftruncate");
       assert(false);
     }
-    if (access_pattern == ACCESS_PATTERN_SEQUENTIAL) {
-      if (posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL) != 0) {
-        perror("posix_fadvise");
-        assert(false);
-      }
-    } else if (access_pattern == ACCESS_PATTERN_RANDOM) {
-      if (posix_fadvise(fd, 0, 0, POSIX_FADV_RANDOM) != 0) {
-        perror("posix_fadvise");
-        assert(false);
-      }
-    } else if (access_pattern == ACCESS_PATTERN_NORMAL) {
-      // pass
-    } else {
-      assert(false);
-    }
-    void* addr = mmap(NULL, bytes, mmap_prot, mmap_flags, fd, 0);
-    assert(addr != MAP_FAILED);
-    if (access_pattern == ACCESS_PATTERN_SEQUENTIAL) {
-      if (madvise(addr, bytes, MADV_SEQUENTIAL) < 0) {
-        perror("madvise");
-        assert(false);
-      }
-    } else if (access_pattern == ACCESS_PATTERN_RANDOM) {
-      if (madvise(addr, bytes, MADV_RANDOM) < 0) {
-        perror("madvise");
-        assert(false);
-      }
-    } else if (access_pattern == ACCESS_PATTERN_NORMAL) {
-      // pass
-    } else {
-      assert(false);
-    }
-
-    _opened    = true;
-    _path      = path;
-    _fd        = fd;
-    _file_mode = mode;
-    _access_pattern = access_pattern;
-    _bytes     = bytes;
-    _addr      = addr;
+    ::close(fd);
     return true;
   }
 
