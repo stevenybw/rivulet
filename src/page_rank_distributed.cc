@@ -119,7 +119,11 @@ int main(int argc, char* argv[]) {
       src[i] = alpha * next_val[i] / (double)(graph.get_index_from_lid(i+1) - graph.get_index_from_lid(i));
       next_val[i] = 1.0 - alpha;
     }
-    graph_context.edge_map(graph, src, next_val, chunk_size, [](double* next_val, double contrib){*next_val += contrib;});
+    // graph_context.edge_map(graph, src, next_val, chunk_size, [](double* next_val, double contrib){*next_val += contrib;});
+    VertexRange<uint32_t> all_vertex(0, num_nodes);
+    auto vertex_value_op = [src](uint32_t u){return src[u];};
+    auto on_update_op = [next_val](uint32_t v, double value) { next_val[v] += value; };
+    graph_context.compute_push_delegate<double>(graph, all_vertex.begin(), all_vertex.end(), vertex_value_op, on_update_op, chunk_size);
 
     MPI_Barrier(MPI_COMM_WORLD);
     duration += currentTimeUs();
