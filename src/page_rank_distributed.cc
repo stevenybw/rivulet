@@ -123,7 +123,8 @@ int main(int argc, char* argv[]) {
     VertexRange<uint32_t> all_vertex(0, num_nodes);
     auto vertex_value_op = [src](uint32_t u){return src[u];};
     auto on_update_op = [next_val](uint32_t v, double value) { next_val[v] += value; };
-    graph_context.compute_push_delegate<double>(graph, all_vertex.begin(), all_vertex.end(), vertex_value_op, on_update_op, chunk_size);
+    auto on_update_gen = [&on_update_op]() {return on_update_op;};
+    graph_context.compute_push_delegate<double, decltype(on_update_op)>(graph, all_vertex.begin(), all_vertex.end(), vertex_value_op, on_update_gen, chunk_size);
 
     MPI_Barrier(MPI_COMM_WORLD);
     duration += currentTimeUs();

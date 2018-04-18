@@ -1,4 +1,4 @@
-EXECUTABLES := page_rank_distributed
+EXECUTABLES := page_rank_distributed bfs_distributed
 #EXECUTABLES := stream_wordcount stream_sum page_rank graph_preprocess page_rank_distributed
 
 HEADERS := include/rivulet.h include/rivulet_impl.h include/channel.h
@@ -22,5 +22,8 @@ page_rank: $(HEADERS) src/page_rank.cc
 
 page_rank_distributed: $(HEADERS) src/page_rank_distributed.cc
 	mpicxx -g -Wall -O2 -Iinclude -std=c++14 -DUPDATE_CAS -march=native -fopenmp -o page_rank_distributed src/util.cc src/ympi_alltoallv.c src/page_rank_distributed.cc -lnuma
+
+bfs_distributed: $(HEADERS) src/bfs_distributed.cc
+	mpicxx -g -Wall -O2 -Iinclude -std=c++14 -DUPDATE_CAS -march=native -fopenmp -o bfs_distributed src/util.cc src/ympi_alltoallv.c src/bfs_distributed.cc -lnuma
 
 .PHONY: all clean

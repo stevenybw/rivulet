@@ -23,7 +23,7 @@ struct VertexRange
   struct Iterator {
     NodeIdType curr_vid;
     Iterator(NodeIdType curr_vid) : curr_vid(curr_vid) {}
-    Iterator operator+(NodeIdType offset) { return curr_vid + offset; }
+    Iterator operator+(NodeIdType offset) { return Iterator(curr_vid + offset); }
     NodeIdType operator*() { return curr_vid; }
     NodeIdType operator-(Iterator rhs_it) { return curr_vid - rhs_it.curr_vid; }
   };
@@ -488,8 +488,8 @@ struct GraphContext {
     }
   }
 
-  template <typename ValueT, typename GraphType, typename VertexIterator, typename VertexValueCallback, typename OnUpdateCallback>
-  void compute_push_delegate(GraphType& graph, VertexIterator frontier_begin, VertexIterator frontier_end, VertexValueCallback vertex_value_op, const OnUpdateCallback& on_update_op, uint32_t chunk_size)
+  template <typename ValueT, typename OnUpdateT, typename GraphType, typename VertexIterator, typename VertexValueCallback, typename OnUpdateGen>
+  void compute_push_delegate(GraphType& graph, VertexIterator frontier_begin, VertexIterator frontier_end, VertexValueCallback vertex_value_op, OnUpdateGen& on_update_gen, uint32_t chunk_size)
   {
     // using NodeT = typename GraphType::NodeType;
     // using IndexT = typename GraphType::IndexType;
@@ -537,7 +537,8 @@ struct GraphContext {
 
     std::thread updater_threads[num_updater_threads];
     for (int i=0; i<num_updater_threads; i++) {
-      updater_threads[i] = std::move(std::thread([this, &on_update_op](int id, int socket_id, int num_client_threads, int num_import_threads, volatile int* client_dones, volatile int* import_dones) {
+      updater_threads[i] = std::move(std::thread([this, &on_update_gen](int id, int socket_id, int num_client_threads, int num_import_threads, volatile int* client_dones, volatile int* import_dones) {
+        OnUpdateT on_update_op = on_update_gen();
         uint64_t num_updates = 0;
         auto process_callback = [&on_update_op, &num_updates](const char* ptr, size_t bytes) {
           num_updates += bytes / sizeof(UpdateRequest);

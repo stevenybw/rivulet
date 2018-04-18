@@ -149,6 +149,10 @@ struct SharedGraph {
     return _index[_begin_vid + lid]; 
   }
 
+  uint64_t get_vid_from_lid(uint64_t lid) const {
+    uint64_t vid = _begin_vid + lid;
+  }
+
   NodeT get_edge_from_index(IndexT index) const {
     return _edges[index];
   }
@@ -345,6 +349,11 @@ struct DistributedGraph
   IndexT get_index_from_lid(uint64_t lid) const { 
     assert(lid <= _num_nodes);
     return _index[lid];
+  }
+
+  uint64_t get_vid_from_lid(uint64_t lid) const {
+    assert(lid < _num_nodes);
+    return (_rank << partition_offset_bits) + lid; 
   }
 
   NodeT get_edge_from_index(IndexT index) const {
