@@ -20,18 +20,20 @@ struct GArray
   T*      _data;
   size_t  _size;
   GArray(Object* obj) : _obj(obj) {
-    _data = (T*) obj->data;
-    assert(obj->capacity % sizeof(T) == 0);
-    _size = obj->capacity / sizeof(T);
+    _data = (T*) obj->local_data();
+    assert(obj->local_capacity() % sizeof(T) == 0);
+    _size = obj->local_capacity() / sizeof(T);
   }
   ~GArray() {
     delete _obj;
   }
 
-  bool is_uniform() { return _obj->mode.is_uniform(); }
-  bool is_separated() { return _obj->mode.is_separated(); }
   T& operator[](size_t idx) { return _data[idx]; }
   size_t size() { return _size; }
+  void resize(size_t size) {
+    assert(size * sizeof(T) <= _obj->local_capacity());
+    _size = size;
+  }
   T* data() { return _data; }
 };
 

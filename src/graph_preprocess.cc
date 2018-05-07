@@ -59,6 +59,7 @@ int main(int argc, char* argv[])
   int required_level = MPI_THREAD_SERIALIZED;
   int provided_level;
   MPI_Init_thread(NULL, NULL, required_level, &provided_level);
+  assert(provided_level >= required_level);
   init_debug();
   int rank, nprocs;
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
@@ -68,7 +69,7 @@ int main(int argc, char* argv[])
   g_nprocs = nprocs;
 
   if (argc < 3) {
-    cerr << "Usage: " << argv[0] << " <input_graph_path> <output_graph_path> <anonymous_prefix>" << endl;
+    cerr << "Usage: " << argv[0] << " <input_graph_path in NFS> <output_graph_path> <anonymous_prefix>" << endl;
     return -1;
   }
 
@@ -76,45 +77,29 @@ int main(int argc, char* argv[])
   string output_graph_path = argv[2];
   string anonymous_prefix = argv[3];
 
-  Driver* driver = new Driver(MPI_COMM_WORLD, new ObjectPool(anonymous_prefix));
-  REGION_BEGIN();
+  ExecutionContext ctx(anonymous_prefix, anonymous_prefix, anonymous_prefix, MPI_COMM_WORLD);
+  Driver* driver = new Driver(ctx);
+  LOG_BEGIN();
+  LOG_INFO("Loading the graph");
   ConfigFile config(graph_path + ".config");
   uint64_t total_num_nodes = config.get_uint64("total_num_nodes");
   uint64_t total_num_edges = config.get_uint64("total_num_edges");
-  GArray<uint32_t>* edges = driver->load_array<uint32_t>(graph_path + ".edges", ObjectMode(UNIFORMITY_UNIFORM_OBJECT, WRITABILITY_READ_ONLY));
-  GArray<uint64_t>* index = driver->load_array<uint64_t>(graph_path + ".index", ObjectMode(UNIFORMITY_UNIFORM_OBJECT, WRITABILITY_READ_ONLY));
-  MPI_Barrier(MPI_COMM_WORLD);
-  assert(edges->size() == total_num_edges);
-  assert(index->size() == (total_num_nodes+1));
-  SharedGraph<uint32_t, uint64_t> graph(rank, nprocs, edges, index);
-  assert(graph.total_num_nodes() == total_num_nodes);
-  assert(graph.total_num_edges() == total_num_edges);
-  LINES;
-  REGION_END("Graph Load");
-  REGION_BEGIN();
-  GArray<pair<uint32_t, uint32_t>>* graph_tuples = driver->to_tuples(graph);
-  LINES;
-  REGION_END("Transform CSR To Tuples");
-  // delete graph; graph=NULL;
-  delete edges; edges=NULL;
-  delete index; index=NULL;
-  REGION_BEGIN();
+  GArray<pair<uint32_t, uint32_t>>* graph_tuples = driver->readFromBinaryRecords<pair<uint32_t, uint32_t>>(graph_path + ".tuples");
+  LOG_INFO("Remap ID For Tuples");
   RemapNodeIdMapFn remap_fn(rank, nprocs);
-  GArray<pair<uint32_t, uint32_t>>* graph_tuples_remapped = driver->map(graph_tuples, remap_fn);
+  GArray<pair<uint32_t, uint32_t>>* graph_tuples_remapped = driver->map(graph_tuples, remap_fn, ObjectRequirement::create_transient(Object::NVM_OFF_CACHE));
   LINES;
-  REGION_END("Remap ID For Tuples");
   delete graph_tuples; graph_tuples=NULL;
-  REGION_BEGIN();
+
+  LOG_INFO("Repart Tuples");
   GArray<pair<uint32_t, uint32_t>>* graph_tuples_reparted = driver->repartition(graph_tuples_remapped, [](pair<uint32_t, uint32_t> edge) {
     uint32_t x = edge.first;
     int part_id = ComposedNodeId(x).partition_id();
     return part_id;
-  });
-  LINES;
-  REGION_END("Repart Tuples");
+  }, ObjectRequirement::create_transient(Object::NVM_OFF_CACHE));
   delete graph_tuples_remapped; graph_tuples_remapped=NULL;
 
-  REGION_BEGIN();
+  LOG_INFO("Local Sort The Tuples");
   {
     pair<uint32_t, uint32_t>* graph_tuples_reparted_arr = graph_tuples_reparted->data();
     size_t graph_tuples_reparted_ne = graph_tuples_reparted->size();
@@ -128,18 +113,19 @@ int main(int argc, char* argv[])
         return false;
     });
   }
-  LINES;
-  REGION_END("Local Sort The Tuples");
-  REGION_BEGIN();
-  auto csr_result = driver->make_csr_from_tuples<uint32_t, uint64_t>(graph_tuples_reparted, [](uint32_t vid) {
-    int part_id = ComposedNodeId(vid).partition_id();
-    return part_id;
-  }, [](uint32_t vid) {
-    uint32_t offset = ComposedNodeId(vid).partition_offset();
-    return offset;
-  }, output_graph_path);
-  LINES;
-  REGION_END("From Tuple To CSR");
+  LOG_INFO("From Tuple To CSR");
+  auto csr_result = driver->make_csr_from_tuples<uint32_t, uint64_t>(graph_tuples_reparted, 
+    [](uint32_t vid) {
+      int part_id = ComposedNodeId(vid).partition_id();
+      return part_id;
+    }, 
+    [](uint32_t vid) {
+      uint32_t offset = ComposedNodeId(vid).partition_offset();
+      return offset;
+    },
+    ObjectRequirement::create_persist(output_graph_path+".edges"),
+    ObjectRequirement::create_persist(output_graph_path+".index"));
+  
   delete graph_tuples_reparted; graph_tuples_reparted=NULL;
   delete get<0>(csr_result);
   delete get<1>(csr_result);

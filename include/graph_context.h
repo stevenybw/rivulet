@@ -488,6 +488,14 @@ struct GraphContext {
     }
   }
 
+  /*! \brief Do grahp computation
+   *
+   *    graph: the graph being computed
+   *    (frontier_begin, frontier_end): current active vertices
+   *    vertex_value_op: u->val[u]  the value to be emitted from source vertex u
+   *    on_update_gen: ->OnUpdateT  generate a new instance of OnUpdateT
+   *    OnUpdateT: (v,contrib)->    update contrib to destination vertex v
+   */
   template <typename ValueT, typename OnUpdateT, typename GraphType, typename VertexIterator, typename VertexValueCallback, typename OnUpdateGen>
   void compute_push_delegate(GraphType& graph, VertexIterator frontier_begin, VertexIterator frontier_end, VertexValueCallback vertex_value_op, OnUpdateGen& on_update_gen, uint32_t chunk_size)
   {
@@ -855,6 +863,49 @@ struct GraphContext {
       }
     }
   }
+
+  //  const static size_t NUM_BUCKETS = 1024;
+  //  const static size_t BUCKET_BYTES = 16 * 1024 * 1024;
+  //  
+  //  char buffer[NUM_BUCKETS][BUCKET_BYTES];
+  //
+  //  struct PreSortClientThreadContext
+  //  {
+  //    
+  //  };
+  //
+  //  void init_pre_sort()
+  //  {
+  //  }
+  //
+  //  template <typename NodeT, typename IndexT, typename VertexT, typename UpdateCallback>
+  //  void edge_map_smp_pre_sort_push(SharedGraph<NodeT, IndexT>& graph, VertexT* curr_val, VertexT* next_val, uint32_t chunk_size, const UpdateCallback& update_op) {
+  //    assert(graph.nprocs() == 1);
+  //    size_t num_nodes = graph.total_num_nodes();
+  //    #pragma omp parallel
+  //    {
+  //      uint32_t num_parts = num_nodes/chunk_size;
+  //      #pragma omp for schedule(dynamic, 1)
+  //      for (uint32_t part_id=0; part_id<num_parts; part_id++) {
+  //        uint32_t chunk_begin = part_id*chunk_size;
+  //        uint32_t chunk_end;
+  //        if (part_id == num_parts - 1) {
+  //          chunk_end = num_nodes;
+  //        } else {
+  //          chunk_end = (part_id+1)*chunk_size;
+  //        }
+  //        for(uint32_t i=chunk_begin; i<chunk_end; i++) {
+  //          uint64_t from = graph._index[i];
+  //          uint64_t to   = graph._index[i+1];
+  //          VertexT  contrib = curr_val[i];
+  //          for (uint64_t idx=from; idx<to; idx++) {
+  //            uint32_t y = graph._edges[idx];
+  //            update_op(&next_val[y], contrib);
+  //          }
+  //        }
+  //      }
+  //    }
+  //  }
 
   template <typename NodeT, typename IndexT, typename VertexT, typename ProtectedUpdateCallback>
   void edge_map_smp_push(SharedGraph<NodeT, IndexT>& graph, VertexT* curr_val, VertexT* next_val, uint32_t chunk_size, const ProtectedUpdateCallback& update_op) {

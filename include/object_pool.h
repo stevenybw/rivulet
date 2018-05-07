@@ -9,14 +9,26 @@
 #include "file.h"
 #include "object.h"
 
+// enum { UNIFORMITY_UNIFORM_OBJECT=1, UNIFORMITY_SEPARATED_OBJECT=2 };
+// enum { WRITABILITY_READ_ONLY=3, WRITABILITY_READ_WRITE=4 };
+
+/*! \brief ObjectPool is responsible for creating & managing objects
+ *
+ *  ObjectPool keeps tracks on currently
+ */
 struct ObjectPool
 {
-  string anonymous_prefix; // prefix for anonymous object
+  string dram_transient_prefix;
+  string nvm_transient_prefix;
+
   random_device            _rand_dev;
   default_random_engine    _rand_gen;
   uniform_int_distribution<uint64_t> _rand_dist;
 
-  ObjectPool(string anonymous_prefix) : anonymous_prefix(anonymous_prefix), _rand_dev(), _rand_gen(_rand_dev()) {}
+  ObjectPool(string dram_transient_prefix, string nvm_transient_prefix) : dram_transient_prefix(dram_transient_prefix), 
+                                                                             nvm_transient_prefix(nvm_transient_prefix), 
+                                                                             _rand_dev(),
+                                                                             _rand_gen(_rand_dev()) {}
 
   string gen_anonymous_name() {
     char fname[256];
@@ -68,5 +80,6 @@ struct ObjectPool
     return obj;
   }
 };
+
 
 #endif

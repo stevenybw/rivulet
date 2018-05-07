@@ -30,10 +30,13 @@ struct MappedFile {
   size_t _bytes;
   void*  _addr;
 
+  size_t get_bytes() { return _bytes; }
+  void* get_addr() { return _addr; }
+
   bool create(const char* path, size_t bytes) {
     if (access(path, F_OK) != -1) {
-      printf("ERROR: Path to be created %s exists\n", path);
-      assert(false);
+      printf("WARNING: Path to be created %s exists, which would be overwritten\n", path);
+      ::unlink(path);
     }
     mode_t mode = S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
     int fd = ::open(path, O_RDWR | O_CREAT, mode);
@@ -120,6 +123,29 @@ struct MappedFile {
     _bytes     = bytes;
     _addr      = addr;
     return true;
+  }
+
+  void msync() {
+    int ok;
+    ok = ::msync(_addr, _bytes, MS_SYNC);
+    if (ok < 0) {
+      perror("msync");
+      assert(false);
+    }
+    ok = ::fsync(_fd);
+    if (ok < 0) {
+      perror("fsync");
+      assert(false);
+    }
+  }
+
+  void unlink() {
+    printf("Unlink file %s\n", _path.c_str());
+    int ok = ::unlink(_path.c_str());
+    if (ok < 0) {
+      perror("unlink");
+      assert(false);
+    }
   }
 
   void close() {

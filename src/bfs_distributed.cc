@@ -120,7 +120,7 @@ int main(int argc, char* argv[])
   g_nprocs = nprocs;
 
   if (argc < 8) {
-    cerr << "Usage: " << argv[0] << " <graph_path> <graph_t_path> <run_mode> <num_iters> <num_threads> <chunk_size> <tmp_path>" << endl;
+    cerr << "Usage: " << argv[0] << " <graph_path> <graph_t_path> <run_mode> <num_iters> <num_threads> <chunk_size> <anonymous_prefix>" << endl;
     return -1;
   }
 
@@ -130,7 +130,7 @@ int main(int argc, char* argv[])
   int num_iters = atoi(argv[4]);
   int num_threads = atoi(argv[5]);
   uint32_t chunk_size = atoi(argv[6]);
-  string tmp_path = argv[7];
+  string anonymous_prefix = argv[7];
 
   if (rank == 0) {
     cout << "  graph_path = " << graph_path << endl;
@@ -157,10 +157,11 @@ int main(int argc, char* argv[])
 
   assert(run_mode_i == RUN_MODE_DELEGATION_PWQ);
 
-  Driver* driver = new Driver(MPI_COMM_WORLD, new ObjectPool(tmp_path));
+  ExecutionContext ctx(anonymous_prefix, anonymous_prefix, anonymous_prefix, MPI_COMM_WORLD);
+  Driver* driver = new Driver(ctx);
   REGION_BEGIN();
-  GArray<uint32_t>* edges = driver->load_array<uint32_t>(graph_path + ".edges", ObjectMode(UNIFORMITY_SEPARATED_OBJECT, WRITABILITY_READ_ONLY));
-  GArray<uint64_t>* index = driver->load_array<uint64_t>(graph_path + ".index", ObjectMode(UNIFORMITY_SEPARATED_OBJECT, WRITABILITY_READ_ONLY));
+  GArray<uint32_t>* edges = driver->create_array<uint32_t>(ObjectRequirement::load_from(graph_path + ".edges"));
+  GArray<uint64_t>* index = driver->create_array<uint64_t>(ObjectRequirement::load_from(graph_path + ".index"));
   DistributedGraph<uint32_t, uint64_t, partition_id_bits> graph(MPI_COMM_WORLD, edges, index);
   REGION_END("Graph Load");
 
@@ -178,7 +179,6 @@ int main(int argc, char* argv[])
   for(int i=0; i<65536; i++) {
     curr_frontier.add(i);
   }
-  
 
   LaunchConfig launch_config;
   launch_config.load_from_config_file("launch.conf");

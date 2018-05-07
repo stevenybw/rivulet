@@ -97,8 +97,8 @@ struct SharedGraph {
   }
 
   SharedGraph(int rank, int nprocs, GArray<NodeT>* edges, GArray<IndexT>* index) {
-    assert(edges->is_uniform() == true);
-    assert(index->is_uniform() == true);
+    // assert(edges->is_uniform() == true);
+    // assert(index->is_uniform() == true);
     _rank = rank;
     _nprocs = nprocs;
     _total_num_edges = edges->size();
@@ -151,6 +151,7 @@ struct SharedGraph {
 
   uint64_t get_vid_from_lid(uint64_t lid) const {
     uint64_t vid = _begin_vid + lid;
+    return vid;
   }
 
   NodeT get_edge_from_index(IndexT index) const {
@@ -293,8 +294,6 @@ struct DistributedGraph
   //}
 
   DistributedGraph(MPI_Comm comm, GArray<NodeT>* edges, GArray<IndexT>* index) {
-    assert(edges->is_separated() == true);
-    assert(index->is_separated() == true);
     _comm = comm;
     MPI_Comm_rank(comm, &_rank);
     MPI_Comm_size(comm, &_nprocs);
