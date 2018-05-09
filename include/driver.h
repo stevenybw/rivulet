@@ -288,13 +288,13 @@ struct Driver
    *  The file path must be in NFS
    */
   template <typename T>
-  GArray<T>* readFromBinaryRecords(string path) {
+  GArray<T>* readFromBinaryRecords(string path, size_t record_size = sizeof(T)) {
     int rank = ctx.get_rank();
     int nprocs = ctx.get_nprocs();
     MappedFile file;
     file.open(path.c_str(), FILE_MODE_READ_ONLY, ACCESS_PATTERN_NORMAL);
-    assert(file.get_bytes() % sizeof(T) == 0);
-    size_t num_elements = file.get_bytes() / sizeof(T);
+    assert(file.get_bytes() % record_size == 0);
+    size_t num_elements = file.get_bytes() / record_size;
     size_t num_elements_chunk = num_elements / nprocs;
     size_t from_idx = rank * num_elements_chunk;
     size_t to_idx = (rank == (nprocs-1))?num_elements:(rank+1)*num_elements_chunk;
@@ -304,7 +304,7 @@ struct Driver
     obj->_is_persist = true;
     obj->_fullname   = "_";
     obj->_local_data = &data[from_idx];
-    obj->_local_capacity = (to_idx - from_idx) * sizeof(T);
+    obj->_local_capacity = (to_idx - from_idx) * record_size;
     GArray<T>* garr = new GArray<T>(obj);
     garr->resize(to_idx - from_idx);
     return garr;
