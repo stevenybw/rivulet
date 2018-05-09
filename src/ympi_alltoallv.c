@@ -54,13 +54,13 @@
 
 // utilities
 
-#define TAG_MESG_1(DESTINATION)        (0x00000000 | (DESTINATION & 0xFFFFFF))
-#define TAG_MESG_2(SOURCE)             (0x01000000 | (SOURCE & 0xFFFFFF))
-#define TAG_MESG_1_LAST(DESTINATION)   (0x02000000 | (DESTINATION & 0xFFFFFF))
-#define TAG_MESG_2_LAST(SOURCE)        (0x03000000 | (SOURCE & 0xFFFFFF))
-#define TAG_MESG_1_INTACT(DESTINATION) (0x04000000 | (DESTINATION & 0xFFFFFF))
-#define TAG_MESG_2_INTACT(SOURCE)      (0x05000000 | (SOURCE & 0xFFFFFF))
-#define TAG_FIN                        (0x06000000)
+#define TAG_MESG_1(DESTINATION)        (0x0000 | (DESTINATION & 0xFF))
+#define TAG_MESG_2(SOURCE)             (0x0100 | (SOURCE & 0xFF))
+#define TAG_MESG_1_LAST(DESTINATION)   (0x0200 | (DESTINATION & 0xFF))
+#define TAG_MESG_2_LAST(SOURCE)        (0x0300 | (SOURCE & 0xFF))
+#define TAG_MESG_1_INTACT(DESTINATION) (0x0400 | (DESTINATION & 0xFF))
+#define TAG_MESG_2_INTACT(SOURCE)      (0x0500 | (SOURCE & 0xFF))
+#define TAG_FIN                        (0x0600)
 
 // #define MPI_Test(...) do{printf("%d> %d AAA\n", rank, __LINE__); MPI_Test(__VA_ARGS__); printf("%d> %d BBB\n", rank, __LINE__);}while(0)
 
@@ -72,16 +72,16 @@ static void sig_handler(int sig) {
   assert(0);
 }
 
-#define TAG_DESTINATION(TAG)     (TAG & 0xFFFFFF)
-#define TAG_SOURCE(TAG)          (TAG & 0xFFFFFF)
+#define TAG_DESTINATION(TAG)     (TAG & 0xFF)
+#define TAG_SOURCE(TAG)          (TAG & 0xFF)
 
 // 0: mesg_1   1: mesg_2
-#define TAG_PHASE(TAG)           ((TAG >> 24) & 1)
+#define TAG_PHASE(TAG)           ((TAG >> 8) & 1)
 
 // 0: not last 1: last
 //#define TAG_IS_LAST(TAG)         ((TAG >> 25) & 1) // TODO: Update with current scheme
-#define TAG_IS_LAST(TAG)         (((TAG >> 25) & 1)||(TAG == TAG_FIN))
-#define TAG_IS_INTACT(TAG)       ((TAG >> 26) & 1)
+#define TAG_IS_LAST(TAG)         (((TAG >> 9) & 1)||(TAG == TAG_FIN))
+#define TAG_IS_INTACT(TAG)       ((TAG >> 10) & 1)
 
 extern int g_group_size;
 

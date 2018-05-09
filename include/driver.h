@@ -18,11 +18,40 @@ using namespace std;
 #include "object.h"
 #include "ympi.h"
 
+/*! \brief Load configuration from environment variable
+ */
+struct Configuration {
+  constexpr static char* NVM_OFF_CACHE_POOL_DIR = "NVM_OFF_CACHE_POOL_DIR";
+  constexpr static char* NVM_OFF_CACHE_POOL_SIZE = "NVM_OFF_CACHE_POOL_SIZE";
+  constexpr static char* NVM_ON_CACHE_POOL_DIR = "NVM_ON_CACHE_POOL_DIR";
+  constexpr static char* NVM_ON_CACHE_POOL_SIZE = "NVM_ON_CACHE_POOL_SIZE";
+
+  string nvm_off_cache_pool_dir;
+  size_t nvm_off_cache_pool_size;
+  string nvm_on_cahce_pool_dir;
+  size_t nvm_on_cahce_pool_size;
+
+  char* get_environment_var(const char* name) {
+    char* result = getenv(name);
+    if (result == NULL) {
+      printf("[ERROR] Environment variable %s is required but does not set.\n", name);
+    }
+    return result;
+  }
+
+  Configuration() {
+    nvm_off_cache_pool_dir = get_environment_var(NVM_OFF_CACHE_POOL_DIR);
+    nvm_off_cache_pool_size = atoll(get_environment_var(NVM_OFF_CACHE_POOL_SIZE));
+    nvm_on_cahce_pool_dir = get_environment_var(NVM_ON_CACHE_POOL_DIR);
+    nvm_on_cahce_pool_size = atoll(get_environment_var(NVM_ON_CACHE_POOL_SIZE));
+  }
+};
+
 /*! \brief Per-run context data
  */
 struct ExecutionContext {
   // Path
-  string dram_staging_path;
+  string dram_staging_path; // Not Used!
   string nvm_offcache_staging_path;
   string nvm_oncache_staging_path;
 
@@ -116,6 +145,8 @@ struct ObjectRequirement
   Object::StorageLevel storage_level() { return _storage_level; }
 
   bool is_type_create() { return _req_type == TYPE_CREATE; }
+  bool is_transient() { return _obj_type == OBJECT_TRANSIENT; } /**< Whether the required object is transient */
+  bool is_in_memory() { return _storage_level == Object::MEMORY; } /**< Whether the required object is in DRAM */
 
   size_t local_capacity() { return _init_capacity; }
   void set_local_capacity(size_t capacity) { _init_capacity = capacity; }
@@ -207,9 +238,7 @@ struct Driver
 
   string storage_level_to_prefix(Object::StorageLevel storage_level)
   {
-    if (storage_level == Object::MEMORY) {
-      return ctx.get_dram_prefix();
-    } else if (storage_level == Object::NVM_OFF_CACHE) {
+    if (storage_level == Object::NVM_OFF_CACHE) {
       return ctx.get_nvm_offcache_prefix();
     } else if (storage_level == Object::NVM_ON_CACHE) {
       return ctx.get_nvm_oncache_prefix();
@@ -220,7 +249,12 @@ struct Driver
 
   /*! \brief Create a new array
    *
-   *  Either from existing file, or writing to a new file
+   *  Requirement type can be: TYPE_CREATE or TYPE_LOAD
+   *  TYPE_CREATE
+   *    PERSIST: To create a persist object, a path must be specified and it will be overwritten afterwards
+   *    TRANSIENT: Allocated via malloc if MEMORY, otherwise create temporary file at corresponding directory
+   *  TYPE_LOAD
+   *    PERSIST: A path must be specified
    */
   template <typename T>
   GArray<T>* create_array(ObjectRequirement obj_req, size_t new_size = 0) {
@@ -229,31 +263,47 @@ struct Driver
         obj_req.set_local_capacity(new_size * sizeof(T));
       }
       size_t local_capacity = obj_req.local_capacity();
+      if (obj_req.is_transient() && obj_req.is_in_memory()) {
+        printf("%d> Create transient DRAM array (bytes = %zu)\n", rank, local_capacity);
+        void* local_data = malloc(local_capacity);
+        Object* obj = new Object([](){;}, [local_data](){free(local_data);});
+        obj->_comm = ctx.get_comm();
+        obj->_is_persist = false;
+        obj->_fullname = "<memory>";
+        obj->_local_data = malloc(local_capacity);
+        obj->_local_capacity = local_capacity;
+        GArray<T>* garr = new GArray<T>(obj);
+        garr->resize(new_size);
+        return garr;
+      }
       bool is_persist;
       string fullname;
+      MappedFile file;
       if (obj_req.obj_type() == ObjectRequirement::OBJECT_TRANSIENT) {
         is_persist = false;
         string prefix = storage_level_to_prefix(obj_req.storage_level());
         char buf[256];
         snprintf(buf, 256, "%s/temp_%016lx.bin", prefix.c_str(), ctx.random_uint64());
         fullname = buf;
+        file.create(fullname.c_str(), local_capacity);
+        file.open(fullname.c_str(), FILE_MODE_READ_WRITE, ACCESS_PATTERN_NORMAL);
+        file.unlink();
       } else if (obj_req.obj_type() == ObjectRequirement::OBJECT_PERSIST) {
         is_persist = true;
         fullname = obj_req.fullname();
+        file.create(fullname.c_str(), local_capacity);
+        file.open(fullname.c_str(), FILE_MODE_READ_WRITE, ACCESS_PATTERN_NORMAL);
       } else {
         throw invalid_argument("Unknown object type");
       }
-      MappedFile file;
-      file.create(fullname.c_str(), local_capacity);
-      file.open(fullname.c_str(), FILE_MODE_READ_WRITE, ACCESS_PATTERN_NORMAL);
       Object* obj;
       if (is_persist) {
-        printf("Create persist file %s\n", file._path.c_str());
+        printf("%d> Create persist array (path = %s  bytes = %zu)\n", rank, file._path.c_str(), local_capacity);
         obj = new Object([file]() mutable {file.msync();}, [file]() mutable {file.close();});
       } else {
-        printf("Create transient file %s\n", file._path.c_str());
+        printf("%d> Create transient file (path = %s  bytes = %zu)\n", rank, file._path.c_str(), local_capacity);
         // for transient object, destruction implies an unlink
-        obj = new Object([file]() mutable {file.msync();}, [file]() mutable {file.unlink(); file.close();});
+        obj = new Object([file]() mutable {file.msync();}, [file]() mutable {file.close();});
       }
       obj->_comm = ctx.get_comm(); 
       obj->_is_persist = is_persist;

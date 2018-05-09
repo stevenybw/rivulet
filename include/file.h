@@ -42,6 +42,7 @@ struct MappedFile {
     int fd = ::open(path, O_RDWR | O_CREAT, mode);
     if (fd < 0) {
       cout << "cannot open file " << path;
+      perror("file open failed");
       assert(false);
     }
     if (ftruncate(fd, bytes) < 0) {

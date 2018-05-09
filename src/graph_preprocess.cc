@@ -69,15 +69,15 @@ int main(int argc, char* argv[])
   g_nprocs = nprocs;
 
   if (argc < 3) {
-    cerr << "Usage: " << argv[0] << " <input_graph_path in NFS> <output_graph_path> <anonymous_prefix>" << endl;
+    cerr << "Usage: " << argv[0] << " <input_graph_path in NFS> <output_graph_path>" << endl;
     return -1;
   }
 
   string graph_path = argv[1];
   string output_graph_path = argv[2];
-  string anonymous_prefix = argv[3];
 
-  ExecutionContext ctx(anonymous_prefix, anonymous_prefix, anonymous_prefix, MPI_COMM_WORLD);
+  Configuration env_config;
+  ExecutionContext ctx(env_config.nvm_off_cache_pool_dir, env_config.nvm_off_cache_pool_dir, env_config.nvm_on_cahce_pool_dir, MPI_COMM_WORLD);
   Driver* driver = new Driver(ctx);
   LOG_BEGIN();
   LOG_INFO("Loading the graph");
@@ -87,7 +87,7 @@ int main(int argc, char* argv[])
   GArray<pair<uint32_t, uint32_t>>* graph_tuples = driver->readFromBinaryRecords<pair<uint32_t, uint32_t>>(graph_path + ".tuples");
   LOG_INFO("Remap ID For Tuples");
   RemapNodeIdMapFn remap_fn(rank, nprocs);
-  GArray<pair<uint32_t, uint32_t>>* graph_tuples_remapped = driver->map(graph_tuples, remap_fn, ObjectRequirement::create_transient(Object::NVM_OFF_CACHE));
+  GArray<pair<uint32_t, uint32_t>>* graph_tuples_remapped = driver->map(graph_tuples, remap_fn, ObjectRequirement::create_transient(Object::NVM_ON_CACHE)); // MPI does not support DAX...
   LINES;
   delete graph_tuples; graph_tuples=NULL;
 
@@ -96,7 +96,7 @@ int main(int argc, char* argv[])
     uint32_t x = edge.first;
     int part_id = ComposedNodeId(x).partition_id();
     return part_id;
-  }, ObjectRequirement::create_transient(Object::NVM_OFF_CACHE));
+  }, ObjectRequirement::create_transient(Object::NVM_ON_CACHE));
   delete graph_tuples_remapped; graph_tuples_remapped=NULL;
 
   LOG_INFO("Local Sort The Tuples");
