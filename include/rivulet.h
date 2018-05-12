@@ -6,6 +6,7 @@
 #include <list>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <string>
 #include <thread>
@@ -13,6 +14,7 @@
 #include <numa.h>
 #include <mpi.h>
 
+#include "common.h"
 #include "channel.h"
 
 using Thread = std::thread;
@@ -23,6 +25,57 @@ using namespace std;
 thread_local int tl_stage_id = -1;
 thread_local int tl_task_id = -1;
 thread_local int tl_transform_id = -1;
+
+int g_rank;
+int g_nprocs;
+
+uint64_t g_begin_ts;
+
+std::mutex g_mpi_lock; // protects mpi routine
+
+uint64_t currentAbsoluteTimestamp() {
+  unsigned hi, lo;
+  asm volatile ("CPUID\n\t"
+      "RDTSC\n\t"
+      "mov %%edx, %0\n\t"
+      "mov %%eax, %1\n\t": "=r" (hi), "=r" (lo) : : "%rax", "%rbx", "%rcx", "%rdx");
+  return ((uint64_t) hi << 32) | lo;
+}
+
+uint64_t currentTimestamp() {
+  return currentAbsoluteTimestamp() - g_begin_ts;
+}
+
+#define MPI_DEBUG
+
+#ifdef MPI_DEBUG
+
+#include <signal.h>
+
+#define assert(COND) do{if(!(COND)) {printf("ASSERTION VIOLATED, PROCESS pid = %d PAUSED\n", getpid()); while(1);}}while(0)
+
+static void MPI_Comm_err_handler_function(MPI_Comm* comm, int* errcode, ...) {
+  assert(0);
+}
+#define LINES do{printf("  %d> %s:%d\n", g_rank, __FUNCTION__, __LINE__);}while(0)
+static void signal_handler(int sig) {
+  printf("SIGNAL %d ENCOUNTERED, PROCESS pid = %d PAUSED\n", sig, getpid());
+  while(true);
+}
+void init_debug() {
+  MPI_Errhandler errhandler;
+  MPI_Comm_create_errhandler(&MPI_Comm_err_handler_function,  &errhandler);
+  MPI_Comm_set_errhandler(MPI_COMM_WORLD, errhandler);
+
+  struct sigaction act;
+  memset(&act, 0, sizeof(struct sigaction));
+  act.sa_handler = signal_handler;
+  sigaction(9, &act, NULL);
+  sigaction(11, &act, NULL);
+}
+#else
+void init_debug() {}
+#endif
 
 // Raised if the channel being closed while pulling
 struct ChannelClosedException : public std::exception {
@@ -202,6 +255,153 @@ struct LocalOutputChannel : public OutputChannel
   }
 };
 
+// Maximum MPI TAG (which is 2**23 in OpenMPI)
+const int MAX_MPI_TAG = (1<<22);
+
+struct MPIOutputChannel : public OutputChannel
+{
+  const static size_t MPI_BUFFER_BYTES = 128*1024;
+  char input_buffer[MPI_BUFFER_BYTES];
+  uint64_t used_bytes;
+  int to_rank;
+  int identifier;
+  bool is_eos;
+
+  MPIOutputChannel(int to_rank, int identifier) : used_bytes(0), to_rank(to_rank), identifier(identifier), is_eos(false) {
+    assert(identifier < MAX_MPI_TAG);
+  }
+
+  void mpi_send(char* buf, size_t bytes) {
+    MPI_Request req;
+    {
+      std::lock_guard<std::mutex> lock(g_mpi_lock);
+      MPI_Isend(buf, bytes, MPI_CHAR, to_rank, identifier, MPI_COMM_WORLD, &req);
+    }
+    while (true) {
+      std::lock_guard<std::mutex> lock(g_mpi_lock);
+      int ok;
+      MPI_Status st;
+      MPI_Test(&req, &ok, &st);
+      if (ok) {
+        break;
+      }
+    }
+  }
+
+  void flush() {
+    if (used_bytes > 0) {
+      mpi_send(input_buffer, used_bytes);
+      used_bytes = 0;
+    }
+  }
+
+  void push(const void* data, size_t bytes, bool is_eager) override {
+    if (MPI_BUFFER_BYTES - used_bytes >= bytes) {
+      memcpy(&input_buffer[used_bytes], data, bytes);
+      used_bytes += bytes;
+    } else {
+      mpi_send(input_buffer, used_bytes);
+      memcpy(&input_buffer[0], data, bytes);
+      used_bytes = bytes;
+    }
+    if (is_eager) {
+      flush();
+    }
+  }
+
+  void close() override {
+    flush();
+    mpi_send(NULL, 0);
+  }
+};
+
+struct MPIInputChannel : public InputChannel
+{
+  const static size_t MPI_BUFFER_BYTES = 128*1024;
+  char input_buffer[MPI_BUFFER_BYTES];
+  uint64_t used_bytes;
+  uint64_t total_bytes;
+  int from_rank;
+  int identifier;
+  bool is_eos;
+
+  MPIInputChannel(int from_rank, int identifier) : used_bytes(0), total_bytes(0), from_rank(from_rank), identifier(identifier), is_eos(false) {
+    assert(identifier < MAX_MPI_TAG);
+  }
+
+  const void* pull(size_t bytes, bool sticky) {
+    assert(bytes <= MPI_BUFFER_BYTES);
+    if (total_bytes - used_bytes >= bytes) {
+      void* result = &input_buffer[used_bytes];
+      used_bytes += bytes;
+      return result;
+    } else {
+      memmove(&input_buffer[0], &input_buffer[used_bytes], total_bytes - used_bytes);
+      total_bytes = total_bytes - used_bytes;
+      used_bytes  = 0;
+      while (true) {
+        std::lock_guard<std::mutex> lock(g_mpi_lock);
+        int ok;
+        MPI_Status st;
+        MPI_Iprobe(from_rank, identifier, MPI_COMM_WORLD, &ok, &st);
+        if (ok) {
+          MPI_Recv(&input_buffer[total_bytes], MPI_BUFFER_BYTES - total_bytes, MPI_CHAR, from_rank, identifier, MPI_COMM_WORLD, &st);
+          int count;
+          MPI_Get_count(&st, MPI_CHAR, &count);
+          if (count != 0) {
+            total_bytes += count;
+            assert(total_bytes >= bytes);
+            used_bytes = bytes;
+            return &input_buffer[0];
+          } else {
+            is_eos = true;
+            // Channel close if size = 0
+            throw ChannelClosedException();
+          }
+        }
+      }
+    }
+  }
+
+  const void* poll(size_t bytes) override {
+    assert(bytes <= MPI_BUFFER_BYTES);
+    if (total_bytes - used_bytes >= bytes) {
+      void* result = &input_buffer[used_bytes];
+      used_bytes += bytes;
+      return result;
+    } else {
+      memmove(&input_buffer[0], &input_buffer[used_bytes], total_bytes - used_bytes);
+      total_bytes = total_bytes - used_bytes;
+      used_bytes  = 0;
+      std::lock_guard<std::mutex> lock(g_mpi_lock);
+      int ok;
+      MPI_Status st;
+      MPI_Iprobe(from_rank, identifier, MPI_COMM_WORLD, &ok, &st);
+      if (ok) {
+        MPI_Recv(&input_buffer[total_bytes], MPI_BUFFER_BYTES - total_bytes, MPI_CHAR, from_rank, identifier, MPI_COMM_WORLD, &st);
+        int count;
+        MPI_Get_count(&st, MPI_CHAR, &count);
+        if (count != 0) {
+          total_bytes += count;
+          assert(total_bytes >= bytes);
+          used_bytes = bytes;
+          return &input_buffer[0];
+        } else {
+          is_eos = true;
+          // Channel close if size = 0
+          throw ChannelClosedException();
+        }
+      } else {
+        return NULL;
+      }
+    }
+  }
+
+  bool eos() override {
+    return is_eos;
+  }
+};
+
 struct ChannelMgr 
 {
   std::map<int, std::pair<LocalChannelType, int>> local_channels;
@@ -215,36 +415,46 @@ struct ChannelMgr
 
   InputChannel* create_input_channel(int from_rank, int from_stage, int from_lid, int to_lid) {
     assert(from_lid <= MAX_LOCAL_TASKS_PER_STAGE);
-    assert(from_rank == rank); //TODO
     int identifier = from_stage * MAX_LOCAL_TASKS_PER_STAGE * MAX_LOCAL_TASKS_PER_STAGE + from_lid * MAX_LOCAL_TASKS_PER_STAGE + to_lid;
-    LocalChannelType channel;
-    auto it = local_channels.find(identifier);
-    if (it != local_channels.end()) {
-      channel = it->second.first;
-      it->second.second++;
+    if (from_rank == rank) {
+      // local input channel
+      LocalChannelType channel;
+      auto it = local_channels.find(identifier);
+      if (it != local_channels.end()) {
+        channel = it->second.first;
+        it->second.second++;
+      } else {
+        channel.init();
+        auto result = local_channels.emplace(identifier, std::make_pair(channel, 1));
+        assert(result.second == true);
+      }
+      return new LocalInputChannel(channel);
     } else {
-      channel.init();
-      auto result = local_channels.emplace(identifier, std::make_pair(channel, 1));
-      assert(result.second == true);
+      // remote input channel
+      return new MPIInputChannel(from_rank, identifier); // receive from the channel from worker (rank, from_stage, from_lid) that send to to_lid
     }
-    return new LocalInputChannel(channel);
   }
 
   OutputChannel* create_output_channel(int to_rank, int from_stage, int from_lid, int to_lid) {
     assert(to_lid <= MAX_LOCAL_TASKS_PER_STAGE);
-    assert(to_rank == rank); //TODO
     int identifier = from_stage * MAX_LOCAL_TASKS_PER_STAGE * MAX_LOCAL_TASKS_PER_STAGE + from_lid * MAX_LOCAL_TASKS_PER_STAGE + to_lid;
-    LocalChannelType channel;
-    auto it = local_channels.find(identifier);
-    if (it != local_channels.end()) {
-      channel = it->second.first;
-      it->second.second++;
+    if (to_rank == rank) {
+      // local output channel
+      LocalChannelType channel;
+      auto it = local_channels.find(identifier);
+      if (it != local_channels.end()) {
+        channel = it->second.first;
+        it->second.second++;
+      } else {
+        channel.init();
+        auto result = local_channels.emplace(identifier, std::make_pair(channel, 1));
+        assert(result.second == true);
+      }
+      return new LocalOutputChannel(channel);
     } else {
-      channel.init();
-      auto result = local_channels.emplace(identifier, std::make_pair(channel, 1));
-      assert(result.second == true);
+      // remote output channel
+      return new MPIOutputChannel(to_rank, identifier);
     }
-    return new LocalOutputChannel(channel);
   }
 
   std::tuple<LocalOutputChannel*, LocalInputChannel*> create_local_channels() {
@@ -265,10 +475,13 @@ struct ChannelMgr
 
 void RV_Init()
 {
-  int required_level = MPI_THREAD_MULTIPLE;
+  int required_level = MPI_THREAD_SERIALIZED;
   int provided_level;
   MPI_Init_thread(NULL, NULL, required_level, &provided_level);
   assert(provided_level >= required_level);
+  MPI_Comm_rank(MPI_COMM_WORLD, &g_rank);
+  MPI_Comm_size(MPI_COMM_WORLD, &g_nprocs);
+  g_begin_ts = currentAbsoluteTimestamp();
 }
 
 void RV_Finalize()

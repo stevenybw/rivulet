@@ -30,7 +30,7 @@ struct Serdes
 
   // Serialize a C++ object into an output channel
   static void stream_serialize(OutputChannel* out, const T& elem) {
-    cerr << "[Error] Not Implemented Serdes"
+    cerr << "[Error] Not Implemented Serdes" << endl;
     assert(false);
   }
 };
@@ -446,7 +446,7 @@ struct TextIO {
       try {
         while (true) {
           string in_element = Serdes<string>::stream_deserialize(in);
-          printf("stage %d transform %d(Combine) task %d> write %s\n", tl_stage_id, tl_transform_id, tl_task_id, in_element.c_str());
+          printf("rank %d stage %d transform %d(Combine) task %d> write %s\n", g_rank, tl_stage_id, tl_transform_id, tl_task_id, in_element.c_str());
           fout << in_element << endl;
         }
       } catch (ChannelClosedException& ex) {

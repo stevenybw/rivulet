@@ -16,15 +16,6 @@ using namespace std;
 
 #define CPU_GHZ 2.5
 
-uint64_t currentTimestamp() {
-  unsigned hi, lo;
-  asm volatile ("CPUID\n\t"
-      "RDTSC\n\t"
-      "mov %%edx, %0\n\t"
-      "mov %%eax, %1\n\t": "=r" (hi), "=r" (lo) : : "%rax", "%rbx", "%rcx", "%rdx");
-  return ((uint64_t) hi << 32) | lo;
-}
-
 struct Dictionary
 {
   vector<string> dict;

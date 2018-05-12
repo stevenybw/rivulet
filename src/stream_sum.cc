@@ -15,15 +15,6 @@ using namespace std;
 
 #define CPU_GHZ 2.5
 
-uint64_t currentTimestamp() {
-  unsigned hi, lo;
-  asm volatile ("CPUID\n\t"
-      "RDTSC\n\t"
-      "mov %%edx, %0\n\t"
-      "mov %%eax, %1\n\t": "=r" (hi), "=r" (lo) : : "%rax", "%rbx", "%rcx", "%rdx");
-  return ((uint64_t) hi << 32) | lo;
-}
-
 struct ParseDouble : public DoFn<string, double> 
 {
   void processElement(ProcessContext& processContext) override {
@@ -112,11 +103,13 @@ struct SumFn : public CombineFn<T, T, T> {
 };
 
 int main(int argc, char* argv[]) {
-  assert(argc == 3);
+  assert(argc == 2);
   RV_Init();
 
-  char* text_path = argv[1];
-  char* output_path = argv[2];
+  init_debug();
+
+  // char* text_path = argv[1];
+  char* output_path = argv[1];
 
   std::unique_ptr<Pipeline> p = make_pipeline();
   WithDevice(Device::CPU()->all_nodes()->all_sockets()->tasks_per_socket(1));
