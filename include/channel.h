@@ -110,6 +110,7 @@ struct ChannelMgr
 
 template<size_t channel_bytes, bool use_nts = false, size_t ALIGNMENT=64>
 struct Channel_1 {
+  const static size_t CHANNEL_BYTES = channel_bytes;
   struct SenderPrivate {
     int    seq;
     size_t bytes;
@@ -308,6 +309,8 @@ struct Channel_1 {
       _sender_private->bytes = curr_bytes + bytes;
     }
     // _mm_stream_ps((float*) &(_window->data[seq][curr_bytes]), *((__m128*) &data));
+    assert(seq < 2);
+    assert(curr_bytes + bytes <= channel_bytes);
     memcpy(&(_window->data[seq][curr_bytes]), data, bytes);
   }
 

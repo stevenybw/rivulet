@@ -446,7 +446,7 @@ struct TextIO {
       try {
         while (true) {
           string in_element = Serdes<string>::stream_deserialize(in);
-          printf("rank %d stage %d transform %d(Combine) task %d> write %s\n", g_rank, tl_stage_id, tl_transform_id, tl_task_id, in_element.c_str());
+          printf("rank %d stage %d transform %d(Write) task %d> write %s\n", g_rank, tl_stage_id, tl_transform_id, tl_task_id, in_element.c_str());
           fout << in_element << endl;
         }
       } catch (ChannelClosedException& ex) {
@@ -563,35 +563,60 @@ struct WindowedCombine
       assert(outputs.size() == 1);
       OutputChannel* out = outputs[0];
       AggregatedInputChannel aggregated_in(inputs);
-      try {
-        while(true) {
+      while(true) {
+        WN<InT> in_element;
+        try {
           // fprintf(stderr, "%d> try receive\n", instance_id);
-          WN<InT> in_element = Serdes<WN<InT>>::stream_deserialize(&aggregated_in);
+          in_element = Serdes<WN<InT>>::stream_deserialize(&aggregated_in);
           // fprintf(stderr, "%d> received wnid = %llu\n", instance_id, in_element.id);
-          uint64_t wnid = in_element.id;
-          uint64_t idx  = wnid % num_windows;
-          if (wnid_list[idx] == wnid) {
-            combine_fn.addInput(&accumulator_list[idx], in_element.e);
-          } else {
-            if (wnid_list[idx] != (uint64_t)-1) {
-              WN<OutT> out_element(std::move(combine_fn.extractOutput(&accumulator_list[idx])), wnid_list[idx]);
-              // printf("stage %d transform %d(Combine) task %d> push the resulf of wnid %d\n", tl_stage_id, tl_transform_id, tl_task_id, out_element.id);
-              Serdes<WN<OutT>>::stream_serialize(out, out_element, this->is_eager);
-            }
-            wnid_list[idx] = wnid;
-            combine_fn.resetAccumulator(&accumulator_list[idx]);
-            combine_fn.addInput(&accumulator_list[idx], in_element.e);
-          }
+        } catch (ChannelClosedException e) {
+          break;
         }
-      } catch (ChannelClosedException e) {
-        assert(aggregated_in.eos());
-        for(int idx=0; idx<num_windows; idx++) {
-          WN<OutT> out_element(std::move(combine_fn.extractOutput(&accumulator_list[idx])), wnid_list[idx]);
-          Serdes<WN<OutT>>::stream_serialize(out, out_element, this->is_eager);
-          wnid_list[idx] = -1;
+        uint64_t wnid = in_element.id;
+        uint64_t idx  = wnid % num_windows;
+
+        if (wnid_list[idx] == (uint64_t)-1) {
+          // empty slot
+          wnid_list[idx] = wnid;
           combine_fn.resetAccumulator(&accumulator_list[idx]);
+          combine_fn.addInput(&accumulator_list[idx], in_element.e);
+        } else if (wnid_list[idx] == wnid) {
+          // matched slot
+          combine_fn.addInput(&accumulator_list[idx], in_element.e);
+        } else if (wnid_list[idx] < wnid) {
+          // new slot
+          WN<OutT> out_element(std::move(combine_fn.extractOutput(&accumulator_list[idx])), wnid_list[idx]);
+          // printf("stage %d transform %d(Combine) task %d> push the resulf of wnid %d\n", tl_stage_id, tl_transform_id, tl_task_id, out_element.id);
+          Serdes<WN<OutT>>::stream_serialize(out, out_element, this->is_eager);
+          wnid_list[idx] = wnid;
+          combine_fn.resetAccumulator(&accumulator_list[idx]);
+          combine_fn.addInput(&accumulator_list[idx], in_element.e);
+        } else {
+          // ignore stale slot
         }
+        /*
+        if (wnid_list[idx] == wnid) {
+          combine_fn.addInput(&accumulator_list[idx], in_element.e);
+        } else {
+          if (wnid_list[idx] != (uint64_t)-1) {
+            WN<OutT> out_element(std::move(combine_fn.extractOutput(&accumulator_list[idx])), wnid_list[idx]);
+            // printf("stage %d transform %d(Combine) task %d> push the resulf of wnid %d\n", tl_stage_id, tl_transform_id, tl_task_id, out_element.id);
+            Serdes<WN<OutT>>::stream_serialize(out, out_element, this->is_eager);
+          }
+          wnid_list[idx] = wnid;
+          combine_fn.resetAccumulator(&accumulator_list[idx]);
+          combine_fn.addInput(&accumulator_list[idx], in_element.e);
+        }
+        */
       }
+      assert(aggregated_in.eos());
+      for(int idx=0; idx<num_windows; idx++) {
+        WN<OutT> out_element(std::move(combine_fn.extractOutput(&accumulator_list[idx])), wnid_list[idx]);
+        Serdes<WN<OutT>>::stream_serialize(out, out_element, this->is_eager);
+        wnid_list[idx] = -1;
+        combine_fn.resetAccumulator(&accumulator_list[idx]);
+      }
+      out->close();
     }
   };
 

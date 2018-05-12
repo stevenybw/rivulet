@@ -1,6 +1,7 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <queue>
 #include <random>
 #include <sstream>
 #include <string>
@@ -83,17 +84,26 @@ struct GenerateEnglishWord : public GenFn<string>
   }
 };
 
-struct WordCountFn : public CombineFn<string, map<string, int>, map<string, int>>
+/*! \brief Combine Function for Word Count + TopK
+ *
+ */
+struct WordCountTopKFn : public CombineFn<string, map<string, int>, map<string, int>>
 {
+  int K;
+  WordCountTopKFn(int K) : K(K) {}
+
   map<string, int>* createAccumulator() override {
     return new map<string, int>();
   }
+
   void resetAccumulator(map<string, int>* acc) override {
     acc->clear();
   }
+
   void addInput(map<string, int>* acc, const string& rhs) override {
     (*acc)[rhs]++;
   }
+
   // TODO: Who free those allocated objects?
   map<string, int>* mergeAccumulators(const std::list<map<string, int>*>& accumulators) override {
     map<string, int>* result_acc = createAccumulator();
@@ -106,8 +116,24 @@ struct WordCountFn : public CombineFn<string, map<string, int>, map<string, int>
     }
     return result_acc;
   }
+
   map<string, int> extractOutput(map<string, int>* acc) {
-    return std::move(*acc);
+    using Pair = std::pair<int, string>;
+    using Heap = priority_queue<Pair, std::vector<Pair>, std::greater<Pair>>;
+    Heap heap;
+    for(auto it=acc->begin(); it!=acc->end(); it++) {
+      heap.emplace(std::make_pair(it->second, it->first));
+      if (heap.size() > K) {
+        heap.pop();
+      }
+    }
+    std::map<string, int> result;
+    while (! heap.empty()) {
+      const Pair& top = heap.top();
+      result.emplace(std::make_pair(top.second, top.first));
+      heap.pop();
+    }
+    return std::move(result);
   }
 };
 
@@ -116,18 +142,28 @@ int main(int argc, char* argv[]) {
   dict.load();
   RV_Init();
 
-  char* output_path = argv[1];
+  init_debug();
+
+  assert(argc == 3);
+
+  string output_path = argv[1];
+  string read_from = argv[2];
 
   std::unique_ptr<Pipeline> p = make_pipeline();
   WithDevice(Device::CPU()->all_nodes()->all_sockets()->tasks_per_socket(1));
-  PCollection<string>* words = p->apply(Generator::of(GenerateEnglishWord(dict)));
+  PCollection<string>* words;
+  if (read_from == "__random__") {
+    words = p->apply(Generator::of(GenerateEnglishWord(dict)));
+  } else {
+    words = p->apply(TextIO::read()->from(read_from.c_str())->set_name("read from file"));
+  }
   PCollection<TS<string>>* words_ts = words->apply(ParDo::of(AssignTimestamp<string>())->set_name("assign timestamp"));
   PCollection<WN<string>>* words_wn = Window::FixedWindows::assign(words_ts, CPU_GHZ * 5e8);
   PCollection<WN<string>>* words_wn_shuffled = Shuffle::byWindowId(words_wn);
 
-  PCollection<WN<map<string,int>>>* wordcounts = WindowedCombine::globally(words_wn_shuffled, WordCountFn());
+  PCollection<WN<map<string,int>>>* wordcounts = WindowedCombine::globally(words_wn_shuffled, WordCountTopKFn(10));
   PCollection<string>* outputs = wordcounts->apply(ParDo::of(WordCountToString())->set_name("to string"));
-  outputs->apply(TextIO::write()->to(output_path));
+  outputs->apply(TextIO::write()->to(output_path.c_str()));
 
   words_wn_shuffled->set_next_transform_eager();
   wordcounts->set_next_transform_eager();

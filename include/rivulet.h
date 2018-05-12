@@ -239,12 +239,19 @@ struct LocalInputChannel : public InputChannel
 
 struct LocalOutputChannel : public OutputChannel
 {
+  const static size_t CHANNEL_BYTES = LocalChannelType::CHANNEL_BYTES;
   LocalChannelType channel;
 
   LocalOutputChannel(LocalChannelType channel) : channel(channel) { }
 
-  void push(const void* data, size_t bytes, bool is_eager) override {
-    channel.push((const char*) data, bytes);
+  void push(const void* data_arg, size_t bytes, bool is_eager) override {
+    const char* data = (const char*)data_arg;
+    size_t sent = 0;
+    while (sent < bytes) {
+      size_t sb = (bytes - sent > CHANNEL_BYTES)?CHANNEL_BYTES:bytes - sent;
+      channel.push(&data[sent], sb);
+      sent += sb;
+    }
     if (is_eager) {
       channel.flush_and_wait();
     }
@@ -272,6 +279,7 @@ struct MPIOutputChannel : public OutputChannel
   }
 
   void mpi_send(char* buf, size_t bytes) {
+    // printf("rank %d stage %d transform %d task %d> MPI Send %zu bytes begin\n", g_rank, tl_stage_id, tl_transform_id, tl_task_id, bytes);
     MPI_Request req;
     {
       std::lock_guard<std::mutex> lock(g_mpi_lock);
@@ -286,6 +294,7 @@ struct MPIOutputChannel : public OutputChannel
         break;
       }
     }
+    // printf("rank %d stage %d transform %d task %d> MPI Send %zu bytes end\n", g_rank, tl_stage_id, tl_transform_id, tl_task_id, bytes);
   }
 
   void flush() {
@@ -349,6 +358,7 @@ struct MPIInputChannel : public InputChannel
           int count;
           MPI_Get_count(&st, MPI_CHAR, &count);
           if (count != 0) {
+            // printf("rank %d stage %d transform %d task %d> MPI Recv %zu bytes\n", g_rank, tl_stage_id, tl_transform_id, tl_task_id, (size_t) count);
             total_bytes += count;
             assert(total_bytes >= bytes);
             used_bytes = bytes;
@@ -382,14 +392,14 @@ struct MPIInputChannel : public InputChannel
         int count;
         MPI_Get_count(&st, MPI_CHAR, &count);
         if (count != 0) {
+          // printf("rank %d stage %d transform %d task %d> MPI Recv %zu bytes\n", g_rank, tl_stage_id, tl_transform_id, tl_task_id, (size_t) count);
           total_bytes += count;
           assert(total_bytes >= bytes);
           used_bytes = bytes;
           return &input_buffer[0];
         } else {
           is_eos = true;
-          // Channel close if size = 0
-          throw ChannelClosedException();
+          return NULL;
         }
       } else {
         return NULL;
@@ -705,6 +715,7 @@ struct DistributedPipelineScheduler {
         })));
       } else {
         for(size_t i=0; i<transform_instance_list.size(); i++) {
+          printf("  rank %d stage id %d, task id %d, transform id %d started\n", g_rank, stage_id, id, i);
           worker_thread_list.push_back(std::move(Thread([this, i](){
             tl_stage_id = stage_id;
             tl_transform_id = i;
@@ -730,7 +741,7 @@ struct DistributedPipelineScheduler {
               tmp_icl[0] = intermediate_input_channels[i-1];
               pt->execute(tmp_icl, tmp_ocl, state);
             }
-            printf("  stage id %d, task id %d, transform id %d terminated\n", stage_id, id, i);
+            printf("  rank %d stage id %d, task id %d, transform id %d terminated\n", g_rank, stage_id, id, i);
           })));
         }
       }
