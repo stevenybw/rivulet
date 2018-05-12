@@ -42,44 +42,22 @@ int main(int argc, char* argv[]) {
   g_rank = rank;
   g_nprocs = nprocs;
 
-  if (argc < 8) {
-    cerr << "Usage: " << argv[0] << " <graph_path> <graph_t_path> <run_mode> <num_iters> <num_threads> <chunk_size> <anonymous_prefix>" << endl;
+  if (argc < 4) {
+    cerr << "Usage: " << argv[0] << " <graph_path> <num_iters> <chunk_size>" << endl;
     return -1;
   }
   string graph_path = argv[1];
-  string graph_t_path = argv[2];
-  string run_mode = argv[3];
-  int num_iters = atoi(argv[4]);
-  int num_threads = atoi(argv[5]);
-  uint32_t chunk_size = atoi(argv[6]);
-  string anonymous_prefix = argv[7];
+  int num_iters = atoi(argv[2]);
+  uint32_t chunk_size = atoi(argv[3]);
 
   if (rank == 0) {
     cout << "  graph_path = " << graph_path << endl;
-    cout << "  graph_t_path = " << graph_t_path << endl;
-    cout << "  run_mode = " << run_mode << endl;
     cout << "  num_iters = " << num_iters << endl;
-    cout << "  num_threads = " << num_threads << endl;
+    cout << "  chunk_size = " << chunk_size << endl;
   }
 
-  int run_mode_i;
-  if (run_mode == "push") {
-    assert(nprocs == 1);
-    run_mode_i = RUN_MODE_PUSH;
-  } else if (run_mode == "pull") {
-    assert(nprocs == 1);
-    run_mode_i = RUN_MODE_PULL;
-  } else if (run_mode == "delegation_pwq") {
-    run_mode_i = RUN_MODE_DELEGATION_PWQ;
-  } else {
-    cerr << "run mode must be: push, pull, delegation_pwq" << endl;
-    return -1;
-  }
-
-  assert(run_mode_i == RUN_MODE_DELEGATION_PWQ);
-
-
-  ExecutionContext ctx(anonymous_prefix, anonymous_prefix, anonymous_prefix, MPI_COMM_WORLD);
+  Configuration env_config;
+  ExecutionContext ctx(env_config.nvm_off_cache_pool_dir, env_config.nvm_off_cache_pool_dir, env_config.nvm_on_cahce_pool_dir, MPI_COMM_WORLD);
   Driver* driver = new Driver(ctx);
   REGION_BEGIN();
   GArray<uint32_t>* edges = driver->create_array<uint32_t>(ObjectRequirement::load_from(graph_path + ".edges"));
