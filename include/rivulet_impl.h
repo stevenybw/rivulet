@@ -573,6 +573,8 @@ struct WindowedCombine
           break;
         }
         uint64_t wnid = in_element.id;
+
+        // TODO be cautious to expensive modular
         uint64_t idx  = wnid % num_windows;
 
         if (wnid_list[idx] == (uint64_t)-1) {
