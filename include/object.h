@@ -21,6 +21,7 @@ class Object
   size_t   _local_capacity;
   function<void()> _on_commit;
   function<void()> _on_delete;
+  function<void*(void*,size_t)> _on_resize;
 
 public:
   /*! \brief Object can be in different storage level that indicates its storage position
@@ -45,7 +46,7 @@ public:
     DIRTY=1
   };
 
-  Object(const function<void()>& on_commit, const function<void()>& on_delete) : _on_commit(on_commit), _on_delete(on_delete) {}
+  Object(const function<void()>& on_commit, const function<void()>& on_delete, const function<void*(void*,size_t)>& on_resize) : _on_commit(on_commit), _on_delete(on_delete), _on_resize(on_resize) {}
 
   ~Object() {
     _on_delete();
@@ -62,14 +63,23 @@ public:
    */
   bool is_persist() { return _is_persist; }
 
-  /*! \brief [GroupOp] Commit the change to underlying storage
+  /*! \brief Commit the local change to underlying storage
    *
    *  Apply the changes into underlying storage. This will switch the object from DIRTY state
    *  to CLEAN state. It will block until all the processes in the communicator have committed.
    */
   void commit() {
     _on_commit();
-    MPI_Barrier(_comm);
+  }
+
+  /*! \brief Resize the local portion of this object
+   *
+   *  Detailed description starts here
+   */
+  void* resize(size_t new_size) { 
+    _local_data = _on_resize(_local_data, new_size);
+    _local_capacity = new_size;
+    return _local_data;
   }
 
   /*! \brief Get the local data buffer of this object

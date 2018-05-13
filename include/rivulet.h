@@ -16,6 +16,7 @@
 
 #include "common.h"
 #include "channel.h"
+#include "driver.h"
 
 using Thread = std::thread;
 //using string = std::string;
@@ -26,11 +27,10 @@ thread_local int tl_stage_id = -1;
 thread_local int tl_task_id = -1;
 thread_local int tl_transform_id = -1;
 
-int g_rank;
-int g_nprocs;
+// int g_rank;
+// int g_nprocs;
 
 uint64_t g_begin_ts;
-
 std::mutex g_mpi_lock; // protects mpi routine
 
 uint64_t currentAbsoluteTimestamp() {
@@ -45,37 +45,6 @@ uint64_t currentAbsoluteTimestamp() {
 uint64_t currentTimestamp() {
   return currentAbsoluteTimestamp() - g_begin_ts;
 }
-
-#define MPI_DEBUG
-
-#ifdef MPI_DEBUG
-
-#include <signal.h>
-
-#define assert(COND) do{if(!(COND)) {printf("ASSERTION VIOLATED, PROCESS pid = %d PAUSED\n", getpid()); while(1);}}while(0)
-
-static void MPI_Comm_err_handler_function(MPI_Comm* comm, int* errcode, ...) {
-  assert(0);
-}
-#define LINES do{printf("  %d> %s:%d\n", g_rank, __FUNCTION__, __LINE__);}while(0)
-static void signal_handler(int sig) {
-  printf("SIGNAL %d ENCOUNTERED, PROCESS pid = %d PAUSED\n", sig, getpid());
-  while(true);
-}
-void init_debug() {
-  MPI_Errhandler errhandler;
-  MPI_Comm_create_errhandler(&MPI_Comm_err_handler_function,  &errhandler);
-  MPI_Comm_set_errhandler(MPI_COMM_WORLD, errhandler);
-
-  struct sigaction act;
-  memset(&act, 0, sizeof(struct sigaction));
-  act.sa_handler = signal_handler;
-  sigaction(9, &act, NULL);
-  sigaction(11, &act, NULL);
-}
-#else
-void init_debug() {}
-#endif
 
 // Raised if the channel being closed while pulling
 struct ChannelClosedException : public std::exception {

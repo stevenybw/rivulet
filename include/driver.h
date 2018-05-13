@@ -266,7 +266,7 @@ struct Driver
       if (obj_req.is_transient() && obj_req.is_in_memory()) {
         printf("%d> Create transient DRAM array (bytes = %zu)\n", rank, local_capacity);
         void* local_data = malloc(local_capacity);
-        Object* obj = new Object([](){;}, [local_data](){free(local_data);});
+        Object* obj = new Object([](){;}, [local_data](){free(local_data);}, [](void* ptr, size_t new_bytes){return realloc(ptr, new_bytes);});
         obj->_comm = ctx.get_comm();
         obj->_is_persist = false;
         obj->_fullname = "<memory>";
@@ -299,11 +299,11 @@ struct Driver
       Object* obj;
       if (is_persist) {
         printf("%d> Create persist array (path = %s  bytes = %zu)\n", rank, file._path.c_str(), local_capacity);
-        obj = new Object([file]() mutable {file.msync();}, [file]() mutable {file.close();});
+        obj = new Object([file]() mutable {file.msync();}, [file]() mutable {file.close();}, [file](void* ptr, size_t new_bytes) mutable ->void* {return file.resize(new_bytes);});
       } else {
         printf("%d> Create transient file (path = %s  bytes = %zu)\n", rank, file._path.c_str(), local_capacity);
         // for transient object, destruction implies an unlink
-        obj = new Object([file]() mutable {file.msync();}, [file]() mutable {file.close();});
+        obj = new Object([file]() mutable {file.msync();}, [file]() mutable {file.close();}, [file](void* ptr, size_t new_bytes) mutable  ->void* {return file.resize(new_bytes);});
       }
       obj->_comm = ctx.get_comm(); 
       obj->_is_persist = is_persist;
@@ -318,7 +318,8 @@ struct Driver
       fullname = obj_req.fullname(); 
       MappedFile file;
       file.open(fullname.c_str(), FILE_MODE_READ_ONLY, ACCESS_PATTERN_NORMAL);
-      Object* obj = new Object([file]() mutable {file.msync();}, [file]() mutable {file.close();});
+      // resize not allowed here
+      Object* obj = new Object([file]() mutable {file.msync();}, [file]() mutable {file.close();}, [file](void* ptr, size_t new_bytes) mutable  ->void* {assert(false); return NULL; });
       obj->_comm  = ctx.get_comm();
       obj->_is_persist = true;
       obj->_fullname   = fullname;

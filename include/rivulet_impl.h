@@ -455,12 +455,75 @@ struct TextIO {
     }
   };
 
+  template <size_t bytes>
+  struct FixedString {
+    char data[bytes];
+  };
+
+  template <size_t line_bytes>
+  struct WriteAsGarrayTransform : public TaggedPTransform<string, PCollectionOutput>
+  {
+    using ThisType = WriteAsGarrayTransform<line_bytes>;
+    Driver* driver;
+    using Line = FixedString<line_bytes>;
+    string write_path_prefix;
+
+    WriteAsGarrayTransform(Driver* driver) : driver(driver) {}
+
+    ThisType* to(const string& write_path_prefix) {
+      this->write_path_prefix = write_path_prefix;
+      return this;
+    }
+
+    ThisType* set_name(const string& name) { this->name = name; return this; }
+
+    string type_name() override { return "WriteAsGarrayTransform"; }
+    bool is_elementwise() override { return true; }
+    bool is_shuffle() override { return false; }
+
+    PTInstance* create_instance(int instance_id) override {
+      PTInstance* instance = new PTInstance;
+      instance->instance_id = instance_id;
+      instance->ptransform = this;
+      instance->state = instance;
+      return instance;
+    }
+
+    void execute(const InputChannelList& inputs, const OutputChannelList& outputs, void* state) override {
+      assert(inputs.size() == 1);
+      assert(outputs.size() == 0);
+      int instance_id = ((PTInstance*)state)->instance_id;
+      InputChannel* in = inputs[0];
+      string write_path = write_path_prefix + "." + std::to_string(instance_id);
+      GArray<Line>* text_garray = driver->create_array<Line>(ObjectRequirement::create_persist(write_path), 0);
+      printf("%d: written to %s\n", instance_id, write_path.c_str());
+      try {
+        while (true) {
+          string in_element = Serdes<string>::stream_deserialize(in);
+          printf("rank %d stage %d transform %d(Write) task %d> write %s\n", g_rank, tl_stage_id, tl_transform_id, tl_task_id, in_element.c_str());
+          Line line;
+          memset(&line, 0, sizeof(Line));
+          strncpy(line.data, in_element.c_str(), sizeof(line.data));
+          text_garray->push_back(line);
+          text_garray->commit();
+        }
+      } catch (ChannelClosedException& ex) {
+        delete text_garray;
+      }
+    }
+  };
+
   static ReadTransform* read() {
     return new ReadTransform;
   }
 
   static WriteTransform* write() {
     return new WriteTransform;
+  }
+
+  template <size_t line_bytes>
+  static WriteAsGarrayTransform<line_bytes>* writeAsGarray(Driver* driver) {
+    return new WriteAsGarrayTransform<line_bytes>(driver);
   }
 };
 

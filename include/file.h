@@ -1,6 +1,8 @@
 #ifndef RIVULET_FILE_H
 #define RIVULET_FILE_H
 
+#define _GNU_SOURCE
+
 #include <iostream>
 #include <string>
 
@@ -27,6 +29,8 @@ struct MappedFile {
   int    _fd;
   int    _file_mode;
   int    _access_pattern;
+  int    _mmap_prot;
+  int    _mmap_flags;
   size_t _bytes;
   void*  _addr;
 
@@ -51,6 +55,34 @@ struct MappedFile {
     }
     ::close(fd);
     return true;
+  }
+
+  void* _mmap(int access_pattern, size_t bytes, int mmap_prot, int mmap_flags, int fd) {
+    if (bytes == 0) {
+      return NULL;
+    } else {
+      void* addr = mmap(NULL, bytes, mmap_prot, mmap_flags, fd, 0);
+      if (addr == MAP_FAILED) {
+        perror("mmap");
+        assert(false);
+      }
+      if (access_pattern == ACCESS_PATTERN_SEQUENTIAL) {
+        if (madvise(addr, bytes, MADV_SEQUENTIAL) < 0) {
+          perror("madvise");
+          assert(false);
+        }
+      } else if (access_pattern == ACCESS_PATTERN_RANDOM) {
+        if (madvise(addr, bytes, MADV_RANDOM) < 0) {
+          perror("madvise");
+          assert(false);
+        }
+      } else if (access_pattern == ACCESS_PATTERN_NORMAL) {
+        // pass
+      } else {
+        assert(false);
+      }
+      return addr;
+    }
   }
 
   bool open(const char* path, int mode, int access_pattern, bool pre_load=false) {
@@ -98,29 +130,16 @@ struct MappedFile {
     } else {
       assert(false);
     }
-    void* addr = mmap(NULL, bytes, mmap_prot, mmap_flags, fd, 0);
-    assert(addr != MAP_FAILED);
-    if (access_pattern == ACCESS_PATTERN_SEQUENTIAL) {
-      if (madvise(addr, bytes, MADV_SEQUENTIAL) < 0) {
-        perror("madvise");
-        assert(false);
-      }
-    } else if (access_pattern == ACCESS_PATTERN_RANDOM) {
-      if (madvise(addr, bytes, MADV_RANDOM) < 0) {
-        perror("madvise");
-        assert(false);
-      }
-    } else if (access_pattern == ACCESS_PATTERN_NORMAL) {
-      // pass
-    } else {
-      assert(false);
-    }
+    
+    void* addr = _mmap(access_pattern, bytes, mmap_prot, mmap_flags, fd);
 
     _opened    = true;
     _path      = path;
     _fd        = fd;
     _file_mode = mode;
     _access_pattern = access_pattern;
+    _mmap_prot = mmap_prot;
+    _mmap_flags= mmap_flags;
     _bytes     = bytes;
     _addr      = addr;
     return true;
@@ -147,6 +166,29 @@ struct MappedFile {
       perror("unlink");
       assert(false);
     }
+  }
+
+  void* resize(size_t new_size) {
+    int ok;
+    ok = ftruncate(_fd, new_size);
+    if (ok < 0) {
+      perror("ftruncate");
+      assert(false);
+    }
+    void* addr = NULL;
+    if (_addr == NULL) {
+      addr = _mmap(_access_pattern, new_size, _mmap_prot, _mmap_flags, _fd);
+    } else {
+      addr = mremap(_addr, _bytes, new_size, MREMAP_MAYMOVE);
+      if (addr == MAP_FAILED) {
+        perror("mremap");
+        assert(false);
+      }
+    }
+    _addr = addr;
+    _bytes = new_size;
+
+    return _addr;
   }
 
   void close() {

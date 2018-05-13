@@ -142,6 +142,10 @@ int main(int argc, char* argv[]) {
   dict.load();
   RV_Init();
 
+  Configuration env_config;
+  ExecutionContext ctx(env_config.nvm_off_cache_pool_dir, env_config.nvm_off_cache_pool_dir, env_config.nvm_on_cahce_pool_dir, MPI_COMM_WORLD);
+  Driver* driver = new Driver(ctx);
+
   init_debug();
 
   assert(argc == 3);
@@ -163,7 +167,7 @@ int main(int argc, char* argv[]) {
 
   PCollection<WN<map<string,int>>>* wordcounts = WindowedCombine::globally(words_wn_shuffled, WordCountTopKFn(10));
   PCollection<string>* outputs = wordcounts->apply(ParDo::of(WordCountToString())->set_name("to string"));
-  outputs->apply(TextIO::write()->to(output_path.c_str()));
+  outputs->apply(TextIO::writeAsGarray<256>(driver)->to(output_path.c_str()));
 
   words_wn_shuffled->set_next_transform_eager();
   wordcounts->set_next_transform_eager();
