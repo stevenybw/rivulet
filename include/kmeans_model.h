@@ -109,8 +109,8 @@ struct KMeansModel{
 //            mark[i] = (int)cblas_isamin(k, dist, 1);
             assert(min_idx != -1);
             mark[i] = min_idx;
-#pragma omp critical
-            count[mark[i]] += 1;
+            __sync_fetch_and_add(&count[mark[i]], 1);
+			//count[mark[i]] += 1;
         }
         // update centers
         memset(centers, 0, k*dim*sizeof(float));
