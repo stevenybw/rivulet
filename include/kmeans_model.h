@@ -19,15 +19,15 @@ struct KMeansModel{
     int nprocs;
 
     float* data = nullptr;
-    int num; // number of samples in this process
-    int dim; // dimension of samples
-    int k;   // number of clusters
+    long long num; // number of samples in this process
+    long long dim; // dimension of samples
+    long long k;   // number of clusters
     int ite; // max of iterations
 
     float* centers = nullptr;
-    int* mark = nullptr; // count[i] : num of samples belonging to cluster[i]
-    int* count = nullptr; // mark[i] : cluster that sample[i] belongs to
-    float cost = -1;
+    long long* mark = nullptr; // count[i] : num of samples belonging to cluster[i]
+    long long* count = nullptr; // mark[i] : cluster that sample[i] belongs to
+    double cost = -1;
 
     KMeansModel(ExecutionContext& ctx):ctx(ctx), comm(ctx.get_comm()), rank(ctx.get_rank()), nprocs(ctx.get_nprocs()){
 	LOG_BEGIN();
@@ -58,7 +58,7 @@ struct KMeansModel{
 		}
 	}
 
-    void train(GArray<float>* garray, int _dim, int _k, int _ite){
+    void train(GArray<float>* garray, long long _dim, long long _k, int _ite){
         assert(garray->_size % _dim == 0); // ensure complete sample
         data = garray->data();
         num = garray->_size / _dim;
@@ -66,8 +66,8 @@ struct KMeansModel{
         k = _k;
         ite = _ite;
         initCenters();
-        count = new int[k];
-        mark = new int[num];
+        count = new long long[k];
+        mark = new long long[num];
         for(int i=0; i<ite; i++){
             char info[100];
             sprintf(info, "Iteration: %d", i);
@@ -85,16 +85,16 @@ struct KMeansModel{
     }
 
     void iteration(){
-		memset(count, 0, k*sizeof(float));
+		memset(count, 0, k*sizeof(long long));
 #pragma omp parallel for
-        for(int i=0; i<num; i++){
+        for(long long i=0; i<num; i++){
             float dist[k] = {0}; // distance from every center
             float min = 1e20;
-            int min_idx =-1;
-            for(int j=0; j<k; j++){
+            long long min_idx =-1;
+            for(long long j=0; j<k; j++){
                 float delta[dim];
                 // TODO: simd?
-                for(int m=0; m<dim; m++){
+                for(long long m=0; m<dim; m++){
                     delta[m] = data[i*dim+m] - centers[j*dim+m];
                     delta[m] = delta[m] * delta[m];
                     dist[j] += delta[m];
@@ -119,8 +119,8 @@ struct KMeansModel{
         // so parallel by dimension: unfriendly to cache, but load balance
         // TODO: is there more efficient implementation?
 #pragma omp parallel for
-        for(int m=0; m<dim; m++){
-            for(int i=0; i<num; i++){
+        for(long long m=0; m<dim; m++){
+            for(long long i=0; i<num; i++){
                 centers[ mark[i]*dim+m ] += data[i*dim+m];
             }
         }
@@ -135,7 +135,7 @@ struct KMeansModel{
 //				//printf("cost before sync: %f \n", computeCost());
 //			}
         MPI_Allreduce(MPI_IN_PLACE, centers, k*dim, MPI_FLOAT, MPI_SUM, comm);
-        MPI_Allreduce(MPI_IN_PLACE, count, k, MPI_INT, MPI_SUM, comm);
+        MPI_Allreduce(MPI_IN_PLACE, count, k, MPI_LONG_LONG, MPI_SUM, comm);
 //			if(rank==1 || rank == 0){
 //				print(centers, k, dim);
 //				print(mark, 1, num);
@@ -143,8 +143,8 @@ struct KMeansModel{
 //				//printf("cost before sync: %f \n", computeCost());
 //			}
 #pragma omp parallel for collapse(2)
-        for(int i=0; i<k; i++){
-            for(int j=0; j<dim; j++){
+        for(long long i=0; i<k; i++){
+            for(long long j=0; j<dim; j++){
                 if(count[i] != 0){
 					centers[i*dim+j] /= count[i];
             	}
@@ -160,28 +160,29 @@ struct KMeansModel{
         }
         centers = new float[k * dim];
         // get total num
-        int total = 0;
-        MPI_Allreduce(&num, &total, 1, MPI_INT, MPI_SUM, comm);
-        int indexes[k] = {0};
+        long long total = 0;
+        MPI_Allreduce(&num, &total, 1, MPI_LONG_LONG, MPI_SUM, comm);
+        long long indexes[k] = {0};
         if(rank == 0){
             srand((unsigned)time(0));
 #pragma omp parallel
-            for(int i=0; i<k; i++){
-                indexes[i] = rand() % total;
+            for(long long i=0; i<k; i++){
+				double ratio = (double)rand() / RAND_MAX;
+                indexes[i] = (long long)(ratio * total);
             }
         }
-		MPI_Bcast(indexes, k, MPI_INT, 0, comm);
+		MPI_Bcast(indexes, k, MPI_LONG_LONG, 0, comm);
 //		print(indexes, 1, k);
-        int chunk_size = total/nprocs;
-        int from_idx = chunk_size*rank;
-        int to_idx = (rank == (nprocs-1))?total:(rank+1)*chunk_size;
+        long long chunk_size = total/nprocs;
+        long long from_idx = chunk_size*rank;
+        long long to_idx = (rank == (nprocs-1))?total:(rank+1)*chunk_size;
 //		printf("rank: %d, from_idx: %d, to_idx: %d", rank, from_idx, to_idx);
 #pragma omp parallel
-        for(int i=0; i<k; i++){
+        for(long long i=0; i<k; i++){
             if(indexes[i] >= from_idx && indexes[i] < to_idx){
                 // sample in this process
-                int offset = (indexes[i]-from_idx)*dim;
-                for(int j=0; j<dim; j++){
+                long long offset = (indexes[i]-from_idx)*dim;
+                for(long long j=0; j<dim; j++){
                     centers[i*dim + j] = data[offset+j];
                 }
             }
@@ -197,27 +198,22 @@ struct KMeansModel{
         return centers;
     }
 
-    float computeCost(){
+    double computeCost(){
         if(data == nullptr || centers == nullptr)
             return -1;
         // within set sum of squared errors
-        float sum = 0;
+        double sum = 0;
 #pragma omp parallel for collapse(2) reduction(+:sum)
-        for(int i=0; i<num; i++){
-            for(int m=0; m<dim; m++){
-                float squared_error = (data[i*dim+m]-centers[mark[i]*dim+m]);
+        for(long long i=0; i<num; i++){
+            for(long long m=0; m<dim; m++){
+                double squared_error = (data[i*dim+m]-centers[mark[i]*dim+m]);
                 sum += (squared_error*squared_error);
             }
         }
-        MPI_Allreduce(&sum, &cost, 1, MPI_FLOAT, MPI_SUM, comm);
+        MPI_Allreduce(&sum, &cost, 1, MPI_DOUBLE, MPI_SUM, comm);
         return cost;
     }
 
-    void delPtr(void* p){
-        if(p != nullptr){
-            delete []p;
-        }
-    }
 };
 
 

@@ -28,10 +28,10 @@ int main(int argc, char* argv[])
     cerr << "Usage: " << argv[0] << " <input_data_path in NFS> <dimension of samples> <numClusters> <numIterations> <anonymous_prefix>" << endl;
     return -1;
   }
-
+  char *pend;
   string data_path = argv[1];
-  int dim = atoi(argv[2]);
-  int k = atoi(argv[3]);
+  long long dim = strtoll(argv[2], &pend, 10);
+  long long k = strtoll(argv[3], &pend, 10);
   int ite = atoi(argv[4]);
   string anonymous_prefix = argv[5];
 
