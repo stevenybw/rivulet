@@ -27,6 +27,7 @@ void  memcpy_nts(void* dst, const void* src, size_t bytes);
 
 void interleave_memory(void* ptr, size_t size, size_t chunk_size, int* node_list, int num_nodes);
 void pin_memory(void* ptr, size_t size);
+void rivulet_yield();
 
 // Modular Approximation
 template <int num_elem>

@@ -342,12 +342,19 @@ struct Channel_1 {
     return *_closed;
   }
 
+  /*! \brief Poll the chanel
+   *
+   *  Return true if the poll is successful (received message)
+   *  Otherwise false
+   */
   template <typename Callable>
-  //void poll(const std::function<void(const char* data, size_t bytes)>& process_callback) {
-  void poll (const Callable& process_callback) {
+  bool poll (const Callable& process_callback) {
     if (_sync->seq != _sync->req.seq) {
       process_callback((const char*) _sync->req.ptr, _sync->req.bytes);
       _sync->seq = _sync->req.seq;
+      return true;
+    } else {
+      return false;
     }
   }
 };

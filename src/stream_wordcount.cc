@@ -53,6 +53,23 @@ struct AssignTimestamp : public DoFn<T, TS<T>>
   }
 };
 
+struct StringSplit : public DoFn<string, string> 
+{
+  constexpr static char* delimer = " ";
+
+  void processElement(typename StringSplit::ProcessContext& processContext) override {
+    string& elem = processContext.element();
+    char buf[elem.size()+1];
+    memcpy(buf, elem.c_str(), elem.size());
+    buf[elem.size()] = '\0';
+    char* token = strtok(buf, delimer);
+    while (token != NULL) {
+      processContext.output(std::string(token));
+      token = strtok(NULL, delimer);
+    }
+  }
+};
+
 struct WordCountToString : public DoFn<WN<map<string, int>>, string> 
 {
   void processElement(ProcessContext& processContext) override {
@@ -81,6 +98,148 @@ struct GenerateEnglishWord : public GenFn<string>
   }
   string generateElement() override {
     return dict.dict[dist(rng)];
+  }
+};
+
+template <typename InputT>
+struct MeasureOpsTransform : public BasePTransform<InputT, PCollectionOutput>
+{
+  void execute(const InputChannelList& inputs, const OutputChannelList& outputs, void* state) override {
+    assert(inputs.size() == 1);
+    InputChannel* in = inputs[0];
+    uint64_t ts = currentTimeUs();
+    uint64_t op = 0;
+    int rank;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    while (true) {
+      InputT in_element = Serdes<InputT>::stream_deserialize(in);
+      op++;
+      uint64_t ts_now = currentTimeUs();
+      if (ts_now - ts > 1e6) {
+        double kops = 1.0e3 * op / (ts_now - ts);
+        printf("%d.%d> performance = %lf KOPS\n", rank, tl_task_id, kops);
+        ts = currentTimeUs();
+        op = 0;
+      }
+    }
+  }
+};
+
+template <typename T>
+void measure_ops(PCollection<T>* pc) {
+  pc->apply(new MeasureOpsTransform<T>());
+}
+
+/*! \brief Accumulator for accumulating word count, and emit the result for each specified duration
+ *
+ */
+struct WordCountAccumulateTopKPTransform : public BasePTransform<string, pair<string, size_t>>
+{
+  int K;
+  uint64_t duration_us;
+
+  struct State {
+    std::map<string, size_t> wordcount;
+  };
+
+  void* new_state() override {
+    return new State;
+  }
+
+  /*! \brief Set is_shuffle to forward its output into topk directly
+   *
+   */
+  bool is_shuffle() override { return true; }
+
+  WordCountAccumulateTopKPTransform(int K, uint64_t duration_us) : K(K), duration_us(duration_us) {}
+
+  void execute(const InputChannelList& inputs, const OutputChannelList& outputs, void* state) override {
+    int rank;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+
+    assert(state);
+    State* typed_state = (State*) state;
+    std::map<string, size_t>& wordcount = typed_state->wordcount;
+    assert(inputs.size() == 1);
+    assert(outputs.size() == 1);
+    InputChannel* in = inputs[0];
+    OutputChannel* out = outputs[0];
+    uint64_t ts = currentTimeUs();
+    uint64_t op = 0;
+    while (true) {
+      string in_element = Serdes<string>::stream_deserialize(in);
+      wordcount[in_element]++;
+      op++;
+      uint64_t ts_now = currentTimeUs();
+      if (ts_now - ts > duration_us) {
+        double kops = 1.0e3 * op / (ts_now - ts);
+        printf("%d.%d> Accumulate performance = %lf KOPS\n", rank, tl_task_id, kops);
+        for(const pair<string, size_t>& entry : wordcount) {
+          Serdes<pair<string, size_t>>::stream_serialize(out, entry, this->is_eager);
+          // printf("%s %zu\n", entry.first.c_str(), entry.second);
+        }
+        wordcount.clear();
+        ts = currentTimeUs();
+        op = 0;
+      }
+    }
+  }
+};
+
+struct WordCountTopKPTransform : public BaseCombinePTransform<pair<string, size_t>, PCollectionOutput>
+{
+  //std::mutex mu;
+  std::map<string, size_t> wordcount;
+  int K;
+  uint64_t duration_us;
+
+  WordCountTopKPTransform(int K, uint64_t duration_us) : K(K), duration_us(duration_us) {}
+
+  vector<pair<string, size_t>> topk() {
+    using Pair = std::pair<size_t, string>;
+    using Heap = priority_queue<Pair, std::vector<Pair>, std::greater<Pair>>;
+    Heap heap;
+    for(auto it=wordcount.begin(); it!=wordcount.end(); it++) {
+      heap.emplace(std::make_pair(it->second, it->first));
+      if (heap.size() > K) {
+        heap.pop();
+      }
+    }
+    size_t num_result = heap.size();
+    vector<pair<string, size_t>> result;
+    while (! heap.empty()) {
+      const Pair& top = heap.top();
+      result.emplace_back(std::make_pair(top.second, top.first));
+      heap.pop();
+    }
+    return std::move(result);
+  }
+
+  void execute_combine(InputChannel* in_channel, OutputChannel* out_channel, void* state) override {
+    int rank;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+
+    InputChannel* in = in_channel;
+    OutputChannel* out = out_channel;
+    uint64_t ts = currentTimeUs();
+    uint64_t op = 0;
+    while (true) {
+      pair<string, size_t> in_element = Serdes<pair<string, size_t>>::stream_deserialize(in);
+      //std::lock_guard<std::mutex> lk(mu);
+      wordcount[in_element.first] += in_element.second;
+      op++;
+      uint64_t ts_now = currentTimeUs();
+      if (ts_now - ts > duration_us) {
+        double kops = 1.0e3 * op / (ts_now - ts);
+        ts = currentTimeUs();
+        op = 0;
+        vector<pair<string, size_t>> topk_result = topk();
+        printf("TOPK RESULT\n");
+        for (auto& p : topk_result) {
+          printf("%20s %10zu\n", p.first.c_str(), p.second);
+        }
+      }
+    }
   }
 };
 
@@ -127,6 +286,7 @@ struct WordCountTopKFn : public CombineFn<string, map<string, int>, map<string, 
         heap.pop();
       }
     }
+
     std::map<string, int> result;
     while (! heap.empty()) {
       const Pair& top = heap.top();
@@ -150,8 +310,8 @@ int main(int argc, char* argv[]) {
 
   assert(argc == 3);
 
-  string output_path = argv[1];
-  string read_from = argv[2];
+  string read_from = argv[1];
+  string output_path = argv[2];
 
   std::unique_ptr<Pipeline> p = make_pipeline();
   WithDevice(Device::CPU()->all_nodes()->all_sockets()->tasks_per_socket(1));
@@ -159,19 +319,27 @@ int main(int argc, char* argv[]) {
   if (read_from == "__random__") {
     words = p->apply(Generator::of(GenerateEnglishWord(dict)));
   } else {
-    words = p->apply(TextIO::read()->from(read_from.c_str())->set_name("read from file"));
+    FileSystemWatch* fs_watch = new FileSystemWatch;
+    fs_watch->add_watch(read_from);
+    PCollection<string>* lines = p->apply(TextIO::readTextFromWatch(fs_watch));
+    words = lines->apply(ParDo::of(StringSplit())->set_name("string split"));
   }
-  PCollection<TS<string>>* words_ts = words->apply(ParDo::of(AssignTimestamp<string>())->set_name("assign timestamp"));
-  PCollection<WN<string>>* words_wn = Window::FixedWindows::assign(words_ts, CPU_GHZ * 5e8);
-  PCollection<WN<string>>* words_wn_shuffled = Shuffle::byWindowId(words_wn);
+  PCollection<pair<string, size_t>>* wordcounts = words->apply(new WordCountAccumulateTopKPTransform(10, 1e6));
 
-  PCollection<WN<map<string,int>>>* wordcounts = WindowedCombine::globally(words_wn_shuffled, WordCountTopKFn(10));
-  PCollection<string>* outputs = wordcounts->apply(ParDo::of(WordCountToString())->set_name("to string"));
-  outputs->apply(TextIO::writeAsGarray<256>(driver)->to(output_path.c_str()));
+  WithDevice(Device::CPU()->one_node()->one_socket()->tasks_per_socket(1));
+  wordcounts->apply(new WordCountTopKPTransform(10, 1e6));
+  // measure_ops(topk);
+//  PCollection<TS<string>>* words_ts = words->apply(ParDo::of(AssignTimestamp<string>())->set_name("assign timestamp"));
+//  PCollection<WN<string>>* words_wn = Window::FixedWindows::assign(words_ts, CPU_GHZ * 5e8);
+//  PCollection<WN<string>>* words_wn_shuffled = Shuffle::byWindowId(words_wn);
+//
+//  PCollection<WN<map<string,int>>>* wordcounts = WindowedCombine::globally(words_wn_shuffled, WordCountTopKFn(10));
+//  PCollection<string>* outputs = wordcounts->apply(ParDo::of(WordCountToString())->set_name("to string"));
+//  outputs->apply(TextIO::writeAsGarray<256>(driver)->to(output_path.c_str()));
 
-  words_wn_shuffled->set_next_transform_eager();
-  wordcounts->set_next_transform_eager();
-  outputs->set_next_transform_eager();
+  words->set_next_transform_eager();
+//  wordcounts->set_next_transform_eager();
+//  outputs->set_next_transform_eager();
 
   p->run();
 

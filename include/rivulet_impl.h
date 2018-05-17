@@ -1,3 +1,5 @@
+const size_t SERIALIZER_BUF_SIZE = 131072;
+
 struct __attribute__((packed)) Header {
   int    type;
   size_t bytes;
@@ -8,7 +10,8 @@ enum {
   TYPE_TS     = 2,
   TYPE_WN     = 3,
   TYPE_PAIR   = 4,
-  TYPE_MAP    = 5
+  TYPE_MAP    = 5,
+  TYPE_VECTOR = 6
 };
 
 // Serializers and deserializers
@@ -35,15 +38,31 @@ struct Serdes
   }
 };
 
+struct SerializeBuffer
+{
+  char* buf;
+  size_t offset;
+  size_t capacity;
+
+  SerializeBuffer(char* buf, size_t offset, size_t capacity) : buf(buf), offset(offset), capacity(capacity) {}
+
+  void append(const void* data, size_t bytes) {
+    assert(offset + bytes <= capacity);
+    memcpy(&buf[offset], data, bytes);
+    offset += bytes;
+  }
+};
+
 // Match TS type via partial specification
 template <typename T>
 struct Serdes<TS<T>>
 {
-  static void serialize(ostringstream& oss, const TS<T>& elem) {
+  static size_t serialize(SerializeBuffer sb, const TS<T>& elem) {
     Header header = {TYPE_TS, elem.ts};
-    oss.write((const char*) &header, sizeof(header));
-    Serdes<T>::serialize(oss, elem.e);
+    sb.append(&header, sizeof(header));
+    return Serdes<T>::serialize(sb, elem.e);
   }
+
   static TS<T> stream_deserialize(InputChannel* in, bool sticky = false) {
     Header* buf = (Header*) in->pull(sizeof(Header), sticky);
     assert(buf->type == TYPE_TS);
@@ -51,21 +70,21 @@ struct Serdes<TS<T>>
     T elem = Serdes<T>::stream_deserialize(in, true);
     return TS<T>(std::move(elem), ts);
   }
+
   static void stream_serialize(OutputChannel* out, const TS<T>& elem, bool is_eager) {
-    ostringstream oss;
-    serialize(oss, elem);
-    string result = oss.str();
-    out->push(result.c_str(), result.size(), is_eager);
+    char buf[SERIALIZER_BUF_SIZE];
+    size_t bytes = serialize(SerializeBuffer(buf, 0, SERIALIZER_BUF_SIZE), elem);
+    out->push(buf, bytes, is_eager);
   }
 };
 
 template <typename T>
 struct Serdes<WN<T>>
 {
-  static void serialize(ostringstream& oss, const WN<T>& elem) {
+  static size_t serialize(SerializeBuffer sb, const WN<T>& elem) {
     Header header = {TYPE_WN, elem.id};
-    oss.write((const char*) &header, sizeof(header));
-    Serdes<T>::serialize(oss, elem.e);
+    sb.append(&header, sizeof(header));
+    return Serdes<T>::serialize(sb, elem.e);
   }
 
   static WN<T> stream_deserialize(InputChannel* in, bool sticky = false) {
@@ -77,20 +96,20 @@ struct Serdes<WN<T>>
   }
 
   static void stream_serialize(OutputChannel* out, const WN<T>& elem, bool is_eager) {
-    ostringstream oss;
-    serialize(oss, elem);
-    string result = oss.str();
-    out->push(result.c_str(), result.size(), is_eager);
+    char buf[SERIALIZER_BUF_SIZE];
+    size_t bytes = serialize(SerializeBuffer(buf, 0, SERIALIZER_BUF_SIZE), elem);
+    out->push(buf, bytes, is_eager);
   }
 };
 
 template <>
 struct Serdes<string>
 {
-  static void serialize(ostringstream& oss, const string& elem) {
+  static size_t serialize(SerializeBuffer sb, const string& elem) {
     Header header = {TYPE_STRING, elem.size()};
-    oss.write((const char*) &header, sizeof(header));
-    oss.write(elem.c_str(), elem.size());
+    sb.append(&header, sizeof(header));
+    sb.append(elem.c_str(), elem.size());
+    return sb.offset;
   }
 
   static string stream_deserialize(InputChannel* in, bool sticky = false) {
@@ -102,21 +121,21 @@ struct Serdes<string>
   }
 
   static void stream_serialize(OutputChannel* out, const string& elem, bool is_eager) {
-    ostringstream oss;
-    serialize(oss, elem);
-    string result = oss.str();
-    out->push(result.c_str(), result.size(), is_eager);
+    char buf[SERIALIZER_BUF_SIZE];
+    size_t bytes = serialize(SerializeBuffer(buf, 0, SERIALIZER_BUF_SIZE), elem);
+    out->push(buf, bytes, is_eager);
   }
 };
 
 template <typename KeyT, typename ValueT>
 struct Serdes<pair<KeyT, ValueT>>
 {
-  static void serialize(ostringstream& oss, const pair<KeyT, ValueT>& elem) {
+  static size_t serialize(SerializeBuffer sb, const pair<KeyT, ValueT>& elem) {
     Header header = {TYPE_PAIR, 0};
-    oss.write((const char*) &header, sizeof(header));
-    Serdes<KeyT>::serialize(oss, elem.first);
-    Serdes<ValueT>::serialize(oss, elem.second);
+    sb.append(&header, sizeof(header));
+    sb.offset = Serdes<KeyT>::serialize(sb, elem.first);
+    sb.offset = Serdes<ValueT>::serialize(sb, elem.second);
+    return sb.offset;
   }
 
   static pair<KeyT, ValueT> stream_deserialize(InputChannel* in, bool sticky = false) {
@@ -128,50 +147,80 @@ struct Serdes<pair<KeyT, ValueT>>
   }
 
   static void stream_serialize(OutputChannel* out, const pair<KeyT, ValueT>& elem, bool is_eager) {
-    ostringstream oss;
-    serialize(oss, elem);
-    string result = oss.str();
-    out->push(result.c_str(), result.size(), is_eager);
+    char buf[SERIALIZER_BUF_SIZE];
+    size_t bytes = serialize(SerializeBuffer(buf, 0, SERIALIZER_BUF_SIZE), elem);
+    out->push(buf, bytes, is_eager);
   }
 };
 
-template <typename KeyT, typename ValueT>
-struct Serdes<map<KeyT, ValueT>>
+template <typename T>
+struct Serdes<vector<T>>
 {
-  static void serialize(ostringstream& oss, const map<KeyT, ValueT>& elem) {
-    Header header = {TYPE_MAP, elem.size()};
-    oss.write((const char*) &header, sizeof(header));
+  static size_t serialize(SerializeBuffer sb, const vector<T>& elem) {
+    Header header = {TYPE_VECTOR, elem.size()};
+    sb.append(&header, sizeof(header));
     for(auto& p : elem) {
-      Serdes<pair<KeyT, ValueT>>::serialize(oss, p);
+      sb.offset = Serdes<T>::serialize(sb, p);
     }
+    return sb.offset;
   }
 
-  static map<KeyT, ValueT> stream_deserialize(InputChannel* in, bool sticky = false) {
-    map<KeyT, ValueT> result;
+  static vector<T> stream_deserialize(InputChannel* in, bool sticky = false) {
     Header* buf = (Header*) in->pull(sizeof(Header), sticky);
-    assert(buf->type == TYPE_MAP);
+    assert(buf->type == TYPE_VECTOR);
     size_t num_elem = buf->bytes;
+    vector<T> result;
     for(size_t i=0; i<num_elem; i++) {
-      pair<KeyT, ValueT> val = Serdes<pair<KeyT, ValueT>>::stream_deserialize(in, true);
-      result.emplace(std::move(val));
+      T val = Serdes<T>::stream_deserialize(in, true);
+      result.emplace_back(std::move(val));
     }
     return result;
   }
 
-  static void stream_serialize(OutputChannel* out, const map<KeyT, ValueT>& elem, bool is_eager) {
-    ostringstream oss;
-    serialize(oss, elem);
-    string result = oss.str();
-    out->push(result.c_str(), result.size(), is_eager);
+  static void stream_serialize(OutputChannel* out, const vector<T>& elem, bool is_eager) {
+    char buf[SERIALIZER_BUF_SIZE];
+    size_t bytes = serialize(SerializeBuffer(buf, 0, SERIALIZER_BUF_SIZE), elem);
+    out->push(buf, bytes, is_eager);
   }
 };
 
+// template <typename KeyT, typename ValueT>
+// struct Serdes<map<KeyT, ValueT>>
+// {
+//   static void serialize(ostringstream& oss, const map<KeyT, ValueT>& elem) {
+//     Header header = {TYPE_MAP, elem.size()};
+//     oss.write((const char*) &header, sizeof(header));
+//     for(auto& p : elem) {
+//       Serdes<pair<KeyT, ValueT>>::serialize(oss, p);
+//     }
+//   }
+// 
+//   static map<KeyT, ValueT> stream_deserialize(InputChannel* in, bool sticky = false) {
+//     map<KeyT, ValueT> result;
+//     Header* buf = (Header*) in->pull(sizeof(Header), sticky);
+//     assert(buf->type == TYPE_MAP);
+//     size_t num_elem = buf->bytes;
+//     for(size_t i=0; i<num_elem; i++) {
+//       pair<KeyT, ValueT> val = Serdes<pair<KeyT, ValueT>>::stream_deserialize(in, true);
+//       result.emplace(std::move(val));
+//     }
+//     return result;
+//   }
+// 
+//   static void stream_serialize(OutputChannel* out, const map<KeyT, ValueT>& elem, bool is_eager) {
+//     ostringstream oss;
+//     serialize(oss, elem);
+//     string result = oss.str();
+//     out->push(result.c_str(), result.size(), is_eager);
+//   }
+// };
 
 template <typename T>
 struct Serdes<T, typename std::enable_if<std::is_fundamental<T>::value>::type>
 {
-  static void serialize(ostringstream& oss, const T& elem) {
-    oss.write((const char*) &elem, sizeof(elem));
+  static size_t serialize(SerializeBuffer sb, const T& elem) {
+    sb.append(&elem, sizeof(elem));
+    return sb.offset;
   }
 
   static T stream_deserialize(InputChannel* in, bool sticky = false) {
@@ -180,7 +229,29 @@ struct Serdes<T, typename std::enable_if<std::is_fundamental<T>::value>::type>
   }
 
   static void stream_serialize(OutputChannel* out, const T& elem, bool is_eager) {
-    out->push((const char*) &elem, sizeof(elem), is_eager);
+    char buf[SERIALIZER_BUF_SIZE];
+    size_t bytes = serialize(SerializeBuffer(buf, 0, SERIALIZER_BUF_SIZE), elem);
+    out->push(buf, bytes, is_eager);
+  }
+};
+
+template <typename T>
+struct Serdes<T, typename std::enable_if<T::CLASS_SERIALIZABLE>::type>
+{
+  static size_t serialize(SerializeBuffer sb, const T& elem) {
+    sb.append(&elem, sizeof(elem));
+    return sb.offset;
+  }
+
+  static T stream_deserialize(InputChannel* in, bool sticky = false) {
+    T* ptr = (T*) in->pull(sizeof(T), sticky);
+    return *ptr;
+  }
+
+  static void stream_serialize(OutputChannel* out, const T& elem, bool is_eager) {
+    char buf[SERIALIZER_BUF_SIZE];
+    size_t bytes = serialize(SerializeBuffer(buf, 0, SERIALIZER_BUF_SIZE), elem);
+    out->push(buf, bytes, is_eager);
   }
 };
 
@@ -260,6 +331,33 @@ struct ParDo {
   template <typename DoFnType>
   static ParDoTransform<DoFnType>* of(const DoFnType& do_fn) {
     return new ParDoTransform<DoFnType>(do_fn);
+  }
+};
+
+template <typename InputT, typename OutputT>
+struct BasePTransform : public TaggedPTransform<InputT, OutputT> {
+  using InputType = InputT;
+  using OutputType = OutputT;
+
+  virtual string type_name() override { return "BasePTransform"; }
+  virtual bool is_shuffle() override { return false; }
+  bool is_elementwise() override { return !is_shuffle(); }
+
+  /*! \brief Inherit this method for stateful ptransform
+   *
+   */
+  virtual void* new_state() { return NULL; };
+
+  PTInstance* create_instance(int instance_id) override {
+    PTInstance* instance = new PTInstance;
+    instance->instance_id = instance_id;
+    instance->ptransform = this;
+    instance->state = new_state();
+    return instance;
+  }
+
+  int get_transform_id(void* state) {
+    return ((PTInstance*)state)->instance_id;
   }
 };
 
@@ -409,6 +507,46 @@ struct TextIO {
     }
   };
 
+  struct ReadFromWatchTransform : public TaggedPTransform<PCollectionInput, string>
+  {
+    FileSystemWatch* watch;
+    ReadFromWatchTransform(FileSystemWatch* watch) : watch(watch) {}
+    ReadFromWatchTransform* set_name(const string& name) { this->name = name; return this; }
+
+    string type_name() override { return "ReadFromWatchTransform"; }
+    bool is_elementwise() override { return true; }
+    bool is_shuffle() override { return false; }
+
+    PTInstance* create_instance(int instance_id) override {
+      PTInstance* instance = new PTInstance;
+      instance->instance_id = instance_id;
+      instance->ptransform = this;
+      instance->state = instance;
+      return instance;
+    }
+
+    void execute(const InputChannelList& inputs, const OutputChannelList& outputs, void* state) override {
+      assert(inputs.size() == 0);
+      assert(outputs.size() == 1);
+      int instance_id = ((PTInstance*)state)->instance_id;
+      OutputChannel* out = outputs[0];
+      while (true) {
+        string path = watch->next_entry();
+        std::ifstream fin(path);
+        if (!fin) {
+          printf("WARNING: file %s failed to open\n", path.c_str());
+          continue;
+        } else {
+          printf("Read from file %s\n", path.c_str());
+        }
+        string line;
+        while (std::getline(fin, line)) {
+          Serdes<string>::stream_serialize(out, line, this->is_eager);
+        }
+      }
+    }
+  };
+
   struct WriteTransform : public TaggedPTransform<string, PCollectionOutput>
   {
     string write_path_prefix;
@@ -521,6 +659,10 @@ struct TextIO {
     return new WriteTransform;
   }
 
+  static ReadFromWatchTransform* readTextFromWatch(FileSystemWatch* watch) { //TODO
+    return new ReadFromWatchTransform(watch);
+  }
+
   template <size_t line_bytes>
   static WriteAsGarrayTransform<line_bytes>* writeAsGarray(Driver* driver) {
     return new WriteAsGarrayTransform<line_bytes>(driver);
@@ -585,6 +727,18 @@ struct CombineFn {
   virtual void  addInput(AccT* acc, const InT& elem)=0;
   virtual AccT* mergeAccumulators(const std::list<AccT*>& accumulators)=0;
   virtual OutT  extractOutput(AccT* accumulator)=0;
+};
+
+template <typename InputT, typename OutputT>
+struct BaseCombinePTransform : public BasePTransform<InputT, OutputT>
+{
+  virtual void execute_combine(InputChannel* in_channel, OutputChannel* out_channel, void* state)=0;
+
+  void execute (const InputChannelList& inputs, const OutputChannelList& outputs, void* state) override {
+    OutputChannel* out = (outputs.size() > 0)?outputs[0]:NULL;
+    AggregatedInputChannel aggregated_in(inputs);
+    execute_combine(&aggregated_in, out, state);
+  }
 };
 
 // Aggregate each window and emit the result into subsequent transforms. This is 

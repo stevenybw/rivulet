@@ -17,6 +17,8 @@
 #include "common.h"
 #include "channel.h"
 #include "driver.h"
+#include "fs_monitor.h"
+#include "util.h"
 
 using Thread = std::thread;
 //using string = std::string;
@@ -111,6 +113,7 @@ struct AggregatedInputChannel : public InputChannel
         last_pos++;
         if (last_pos == num_inputs) {
           last_pos = 0;
+          rivulet_yield();
         }
         if (input_valid_list[last_pos]) {
           const void* result = input_channel_list[last_pos]->poll(bytes);
@@ -144,7 +147,7 @@ struct AggregatedInputChannel : public InputChannel
 };
 
 const size_t MAX_PULL_BYTES = 128*1024;
-const size_t LOCAL_CHANNEL_BUFFER_BYTES = 4*1024;
+const size_t LOCAL_CHANNEL_BUFFER_BYTES = 32*1024;
 const size_t MAX_LOCAL_TASKS_PER_STAGE = 256;
 using LocalChannelType = Channel_1<LOCAL_CHANNEL_BUFFER_BYTES>;
 
@@ -170,10 +173,13 @@ struct LocalInputChannel : public InputChannel
         if (channel.eos()) {
           throw ChannelClosedException();
         }
-        channel.poll([this](const char* data, size_t data_bytes) {
+        bool has_message = channel.poll([this, &has_message](const char* data, size_t data_bytes) {
           memcpy(&input_buffer[total_bytes], data, data_bytes);
           total_bytes += data_bytes;
         });
+        if (!has_message) {
+          rivulet_yield();
+        }
       }
       used_bytes = bytes;
       return &input_buffer[0];
@@ -511,11 +517,21 @@ struct CPUDevice {
     return this;
   }
 
+  CPUDevice* one_node() {
+    node_set.insert(0);
+    return this;
+  }
+
   CPUDevice* all_sockets() {
     int num_sockets = numa_num_configured_nodes();
     for(int i=0; i<num_sockets; i++) {
       socket_set.insert(i);
     }
+    return this;
+  }
+
+  CPUDevice* one_socket() {
+    socket_set.insert(0);
     return this;
   }
 

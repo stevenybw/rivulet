@@ -3,6 +3,8 @@
 #include <immintrin.h>
 #include <numa.h>
 #include <numaif.h>
+#include <sched.h>
+#include <time.h>
 
 #include "util.h"
 
@@ -82,4 +84,8 @@ void pin_memory(void* ptr, size_t size) {
     perror("mlock failed");
     assert(false);
   }
+}
+
+void rivulet_yield() {
+  sched_yield();
 }

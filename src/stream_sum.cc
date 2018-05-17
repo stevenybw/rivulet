@@ -59,6 +59,35 @@ struct AssignTimestamp : public DoFn<T, TS<T>>
   }
 };
 
+template <typename InputT>
+struct MeasureOpsTransform : public BasePTransform<InputT, PCollectionOutput>
+{
+  void execute(const InputChannelList& inputs, const OutputChannelList& outputs, void* state) override {
+    assert(inputs.size() == 1);
+    InputChannel* in = inputs[0];
+    uint64_t ts = currentTimeUs();
+    uint64_t op = 0;
+    int rank;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    while (true) {
+      InputT in_element = Serdes<InputT>::stream_deserialize(in);
+      op++;
+      uint64_t ts_now = currentTimeUs();
+      if (ts_now - ts > 1e6) {
+        double kops = 1.0e3 * op / (ts_now - ts);
+        printf("%d.%d> performance = %lf KOPS\n", rank, tl_task_id, kops);
+        ts = currentTimeUs();
+        op = 0;
+      }
+    }
+  }
+};
+
+template <typename T>
+void measure_ops(PCollection<T>* pc) {
+  pc->apply(new MeasureOpsTransform<T>());
+}
+
 struct GenerateRandomDouble : public GenFn<double>
 {
   const static uint64_t a = 6364136223846793005LL;
@@ -108,31 +137,29 @@ int main(int argc, char* argv[]) {
 
   init_debug();
 
-  string output_path = argv[1];
-  string text_path = argv[2];
+  string text_path = argv[1];
+  string output_path = argv[2];
 
   std::unique_ptr<Pipeline> p = make_pipeline();
-  WithDevice(Device::CPU()->all_nodes()->all_sockets()->tasks_per_socket(1));
+  WithDevice(Device::CPU()->all_nodes()->all_sockets()->tasks_per_socket(2));
   PCollection<double>* parsed_array = NULL;
   if (text_path == "__random__") {
     parsed_array = p->apply(Generator::of(GenerateRandomDouble(0.0, 1.0)));
   } else {
-    PCollection<string>* input = p->apply(TextIO::read()->from(text_path.c_str())->set_name("read from file"));
-    parsed_array = input->apply(ParDo::of(ParseDouble())->set_name("parse to double"));
+    FileSystemWatch* fs_watch = new FileSystemWatch;
+    fs_watch->add_watch(text_path);
+    PCollection<string>* input = p->apply(TextIO::readTextFromWatch(fs_watch));
+    parsed_array = input->apply(ParDo::of(ParseDouble()));
   }
-
   PCollection<TS<double>>* ts_parsed_array = parsed_array->apply(ParDo::of(AssignTimestamp<double>())->set_name("assign timestamp"));
   PCollection<WN<double>>* wn_parsed_array = Window::FixedWindows::assign(ts_parsed_array, CPU_GHZ * 5e8);
-  PCollection<WN<double>>* wn_parsed_array_shuffled = Shuffle::byWindowId(wn_parsed_array);
-  
-  // PCollection<string>* outputs = wn_parsed_array->apply(ParDo::of(ValueToString())->set_name("to string"));
-  // outputs->apply(TextIO::write()->to(output_path));
+  // measure_ops(wn_parsed_array);
 
+  PCollection<WN<double>>* wn_parsed_array_shuffled = Shuffle::byWindowId(wn_parsed_array);
   WithDevice(Device::CPU()->all_nodes()->all_sockets()->tasks_per_socket(1));
   PCollection<WN<double>>* wn_parsed_array_reduced = WindowedCombine::globally(wn_parsed_array_shuffled, SumFn<double>(0.0));
   PCollection<string>* outputs = wn_parsed_array_reduced->apply(ParDo::of(ValueToString())->set_name("to string"));
   outputs->apply(TextIO::write()->to(output_path.c_str()));
-
   wn_parsed_array_shuffled->set_next_transform_eager();
   wn_parsed_array_reduced->set_next_transform_eager();
   outputs->set_next_transform_eager();
