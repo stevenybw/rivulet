@@ -29,8 +29,8 @@ struct KMeansModel{
     long long* count = nullptr; // mark[i] : cluster that sample[i] belongs to
     double cost = -1;
 
-    KMeansModel(ExecutionContext& ctx):ctx(ctx), comm(ctx.get_comm()), rank(ctx.get_rank()), nprocs(ctx.get_nprocs()){
-	LOG_BEGIN();
+    KMeansModel(ExecutionContext& ctx, uint64_t _dur):ctx(ctx), comm(ctx.get_comm()), rank(ctx.get_rank()), nprocs(ctx.get_nprocs()){
+		duration = _dur;
 	}
     ~KMeansModel(){
         DELETE_ARRAY(centers);

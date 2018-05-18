@@ -40,7 +40,7 @@ int main(int argc, char* argv[])
   LOG_BEGIN();
   LOG_INFO("Loading kmeans data");
   GArray<float>* kmeans_data = driver->readFromBinaryRecords<float>(data_path, dim*sizeof(float));
-  KMeansModel km = KMeansModel(ctx);
+  KMeansModel km = KMeansModel(ctx, duration);
   LOG_INFO("Train");
   km.train(kmeans_data, dim, k, ite);
 

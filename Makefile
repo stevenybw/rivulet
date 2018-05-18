@@ -1,4 +1,4 @@
-EXECUTABLES := page_rank_distributed bfs_distributed kmeans
+EXECUTABLES := page_rank_distributed bfs_distributed kmeans logistic_regression
 #EXECUTABLES := stream_wordcount stream_sum page_rank graph_preprocess page_rank_distributed
 
 HEADERS := include/rivulet.h include/rivulet_impl.h include/channel.h
@@ -29,5 +29,7 @@ bfs_distributed: $(HEADERS) src/bfs_distributed.cc
 kmeans: $(HEADERS) src/kmeans.cc
 	mpicxx -g -Wall -O2 -Iinclude -std=c++14 -DUPDATE_CAS -march=native -fopenmp -o kmeans src/util.cc src/ympi_alltoallv.c src/kmeans.cc -lnuma
 
+logistic_regression: $(HEADERS) src/logistic_regression.cc
+	mpicxx -g -Wall -O0 -Iinclude -std=c++14 -DUPDATE_CAS -march=native -fopenmp -o logistic_regression src/util.cc src/ympi_alltoallv.c src/logistic_regression.cc -lnuma
 
 .PHONY: all clean
