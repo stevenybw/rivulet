@@ -96,6 +96,7 @@ struct OnUpdate
   }
 
   void operator()(uint32_t v, uint32_t vertex_value) {
+    // printf("!!!! target: %u    parent: %u\n", v, vertex_value);
     if (parent[v] == (uint32_t)-1) {
       local_num_delta_active++;
       parent[v] = vertex_value;
@@ -119,18 +120,22 @@ int main(int argc, char* argv[])
   g_rank = rank;
   g_nprocs = nprocs;
 
-  if (argc < 4) {
-    cerr << "Usage: " << argv[0] << " <graph_path> <num_iters> <chunk_size>" << endl;
+  if (argc < 6) {
+    cerr << "Usage: " << argv[0] << " <graph_path> <num_iters> <chunk_size> <root_vertex_part> <root_vertex_offset>" << endl;
     return -1;
   }
   string graph_path = argv[1];
   int num_iters = atoi(argv[2]);
   uint32_t chunk_size = atoi(argv[3]);
+  int root_vertex_part = atoi(argv[4]);
+  uint64_t root_vertex_offset = atol(argv[5]);
+
 
   if (rank == 0) {
     cout << "  graph_path = " << graph_path << endl;
     cout << "  num_iters = " << num_iters << endl;
     cout << "  chunk_size = " << chunk_size << endl;
+    cout << "  root_vertex_id = " << root_vertex_part << ":" << root_vertex_offset << endl;
   }
 
   Configuration env_config;
@@ -153,8 +158,8 @@ int main(int argc, char* argv[])
   Queue<uint32_t> next_frontier(local_num_nodes);
   memset(parent, 0xFF, local_num_nodes * sizeof(uint32_t));
 
-  for(int i=0; i<65536; i++) {
-    curr_frontier.add(i);
+  if (root_vertex_part == rank) {
+    curr_frontier.add(root_vertex_offset);
   }
 
   LaunchConfig launch_config;
@@ -174,6 +179,8 @@ int main(int argc, char* argv[])
   // };
   auto update_generator = [&next_frontier, &num_delta_active, parent]() { return OnUpdate(&num_delta_active, parent, next_frontier); };
   uint32_t iter_id = 0;
+  uint64_t num_visited = 0;
+  duration = -currentTimeUs();
   while (true) {
     size_t local_curr_active = curr_frontier.size();
     size_t global_curr_active = 0;
@@ -190,11 +197,19 @@ int main(int argc, char* argv[])
     MPI_Allreduce(&num_delta_active, &global_num_delta_active, 1, MPI_UNSIGNED, MPI_SUM, MPI_COMM_WORLD);
     if (rank == 0) {
       printf("Iter %u size(curr_frontier)=%zu size(next_frontier)=%zu global_num_delta_active=%u\n", iter_id, global_curr_active, global_next_active, global_num_delta_active);
+      num_visited += global_curr_active;
     }
     curr_frontier.swap(next_frontier);
     next_frontier.clear();
     iter_id++;
     MPI_Barrier(MPI_COMM_WORLD);
+  }
+  duration += currentTimeUs();
+  if (rank == 0) {
+    printf("Root Vertex Id = %d:%lu\n", root_vertex_part, root_vertex_offset);
+    printf("Running Time (sec) = %lf\n", (1e-6*duration));
+    printf("Total Number of Iterations = %u\n", iter_id);
+    printf("Total Number of Vertices Visited = %lu\n", num_visited);
   }
 
   MPI_Finalize();

@@ -350,7 +350,7 @@ struct Driver
     size_t from_idx = rank * num_elements_chunk;
     size_t to_idx = (rank == (nprocs-1))?num_elements:(rank+1)*num_elements_chunk;
     T* data = (T*) file.get_addr();
-    Object* obj = new Object([](){}, [file]() mutable {file.close();});
+    Object* obj = new Object([](){}, [file]() mutable {file.close();}, [file](void* ptr, size_t new_bytes) mutable  ->void* {assert(false); return NULL; });
     obj->_comm = ctx.get_comm();
     obj->_is_persist = true;
     obj->_fullname   = "_";

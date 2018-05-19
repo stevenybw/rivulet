@@ -733,7 +733,7 @@ struct GraphContext {
 
     uint64_t edges_processed_per_thread[num_client_threads];
     uint64_t frontier_num_nodes = frontier_end - frontier_begin;
-    uint32_t num_chunks         = frontier_num_nodes/chunk_size;
+    uint32_t num_chunks         = (frontier_num_nodes + chunk_size - 1)/chunk_size;
     // uint64_t num_local_nodes = graph.local_num_nodes();
     *current_chunk_id           = 0;
 

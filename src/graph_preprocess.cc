@@ -68,8 +68,9 @@ int main(int argc, char* argv[])
   g_rank = rank;
   g_nprocs = nprocs;
 
-  if (argc < 3) {
-    cerr << "Usage: " << argv[0] << " <input_graph_path in NFS> <output_graph_path>" << endl;
+  if (argc < 4) {
+    cerr << "Usage: " << argv[0] << " <input_graph_path in NFS> <output_graph_path> <method>" << endl;
+    cerr << "  method: vertex, chunk"
     return -1;
   }
 
