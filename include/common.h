@@ -7,6 +7,6 @@
 #define REGION_BEGIN() do{duration = -currentTimeUs();}while(0)
 #define REGION_END(msg) do{duration += currentTimeUs(); if (rank == 0){printf("  [%s] %s Time: %lf sec\n", __FUNCTION__, msg, 1e-6 * duration);}}while(0)
 #define LOG_BEGIN() do{duration = -currentTimeUs();}while(0)
-#define LOG_INFO(msg) do{if(rank == 0) {printf("  [%s] %s Time: %lf sec\n", __FUNCTION__, msg, 1e-6 * (duration + currentTimeUs()));}}while(0)
+#define LOG_INFO(msg) do{if(rank == 0) {printf("  [%s] %s Time: %lf sec\n", __FUNCTION__, msg, (1e-6 * (duration + currentTimeUs())));}}while(0)
 
 #endif

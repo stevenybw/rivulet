@@ -354,10 +354,9 @@ struct Driver
     obj->_comm = ctx.get_comm();
     obj->_is_persist = true;
     obj->_fullname   = "_";
-    obj->_local_data = &data[from_idx];
+    obj->_local_data = &data[from_idx*(record_size/sizeof(T))];
     obj->_local_capacity = (to_idx - from_idx) * record_size;
     GArray<T>* garr = new GArray<T>(obj);
-    garr->resize(to_idx - from_idx);
     return garr;
   }
 
