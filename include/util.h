@@ -27,7 +27,18 @@ void  memcpy_nts(void* dst, const void* src, size_t bytes);
 
 void interleave_memory(void* ptr, size_t size, size_t chunk_size, int* node_list, int num_nodes);
 void pin_memory(void* ptr, size_t size);
+int  rivulet_numa_socket_bind(int socket_id);
 void rivulet_yield();
+
+extern std::mutex mu_mpi_routine;
+using LockGuard = std::lock_guard<std::mutex>;
+
+int MT_MPI_Cancel(MPI_Request *request);
+int MT_MPI_Get_count(const MPI_Status *status, MPI_Datatype datatype, int *count);
+int MT_MPI_Isend(const void *buf, int count, MPI_Datatype datatype, int dest, int tag, MPI_Comm comm, MPI_Request *request);
+int MT_MPI_Irecv(void *buf, int count, MPI_Datatype datatype, int source, int tag, MPI_Comm comm, MPI_Request *request);
+int MT_MPI_Test(MPI_Request *request, int *flag, MPI_Status *status);
+int MT_MPI_Send(const void *buf, int count, MPI_Datatype datatype, int dest, int tag, MPI_Comm comm) ;
 
 // Modular Approximation
 template <int num_elem>

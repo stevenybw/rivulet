@@ -86,6 +86,53 @@ void pin_memory(void* ptr, size_t size) {
   }
 }
 
+int  rivulet_numa_socket_bind(int socket_id) {
+  return numa_run_on_node(socket_id);
+}
+
 void rivulet_yield() {
   sched_yield();
+}
+
+std::mutex mu_mpi_routine;
+
+int MT_MPI_Cancel(MPI_Request *request)
+{
+  LockGuard lk(mu_mpi_routine);
+  return MPI_Cancel(request);
+}
+
+int MT_MPI_Get_count(const MPI_Status *status, MPI_Datatype datatype, int *count)
+{
+  LockGuard lk(mu_mpi_routine);
+  return MPI_Get_count(status, datatype, count);
+}
+
+int MT_MPI_Isend(const void *buf, int count, MPI_Datatype datatype, int dest, int tag, MPI_Comm comm, MPI_Request *request)
+{
+  LockGuard lk(mu_mpi_routine);
+  return MPI_Isend(buf, count, datatype, dest, tag, comm, request);
+}
+
+int MT_MPI_Irecv(void *buf, int count, MPI_Datatype datatype, int source, int tag, MPI_Comm comm, MPI_Request *request)
+{
+  LockGuard lk(mu_mpi_routine);
+  return MPI_Irecv(buf, count, datatype, source, tag, comm, request);
+}
+
+int MT_MPI_Test(MPI_Request *request, int *flag, MPI_Status *status)
+{
+  LockGuard lk(mu_mpi_routine);
+  return MPI_Test(request, flag, status);
+}
+
+int MT_MPI_Send(const void *buf, int count, MPI_Datatype datatype, int dest, int tag, MPI_Comm comm) 
+{
+  MPI_Request req;
+  MT_MPI_Isend(buf, count, datatype, dest, tag, comm, &req);
+  int flag = 0;
+  while (!flag) {
+    MT_MPI_Test(&req, &flag, MPI_STATUS_IGNORE);
+  }
+  return MPI_SUCCESS;
 }

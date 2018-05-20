@@ -6,6 +6,7 @@ export NVM_ON_CACHE_POOL_SIZE=103079215104
 
 INPUT_GRAPH_PATH=~/Dataset/twitter-2010
 OUTPUT_GRAPH_PATH=/mnt/pmem0/twitter-2010
+UNBALANCED_GRAPH_PATH=/mnt/pmem0/twitter-2010-unbalanced
 LOG=./result
 HOSTS="phoenix00,phoenix01"
 NUM_ITERS=10
@@ -41,11 +42,15 @@ echo "3.2.2.3 数据对象模型可容错"
 # 数据对象模型可容错
 echo "重启系统，验证结果"
 
-# 用户控制的重新排布
-
 # 图计算
+
+# 数据预处理
 mpirun --bind-to none -n 2 -host ${HOSTS} ./graph_preprocess ${INPUT_GRAPH_PATH} ${OUTPUT_GRAPH_PATH}
+
+# PageRank
 mpirun --bind-to none -n 2 -host ${HOSTS} ./page_rank_distributed ${OUTPUT_GRAPH_PATH} ${NUM_ITERS} ${CHUNK_SIZE}
+
+# BFS从0号顶点开始
 mpirun --bind-to none -n 2 -host ${HOSTS} ./bfs_distributed ${OUTPUT_GRAPH_PATH} ${NUM_ITERS} ${CHUNK_SIZE} 0 0
 
 # 流处理
@@ -53,3 +58,7 @@ mpirun --bind-to none -n 2 -host phoenix00,phoenix01 ./stream_wordcount __random
 mpirun --bind-to none -n 2 -host phoenix00,phoenix01 ./stream_wordcount /mnt/shm output.txt
 
 # 机器学习？
+
+#负载均衡
+mpirun --bind-to none -n 2 -host ${HOSTS} ./graph_preprocess ${INPUT_GRAPH_PATH} ${UNBALANCED_GRAPH_PATH} equal_vertex
+mpirun --bind-to none -n 2 -host ${HOSTS} ./graph_preprocess ${INPUT_GRAPH_PATH} ${OUTPUT_GRAPH_PATH} chunkroundrobin
