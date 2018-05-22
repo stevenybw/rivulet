@@ -2,6 +2,7 @@
 #define RIVULET_GRAPH_CONTEXT_H
 
 #include <mutex>
+#include <queue>
 #include <thread>
 
 #include <mpi.h>
@@ -31,24 +32,75 @@ struct VertexRange
   Iterator end() const { return Iterator(to); }
 };
 
-
-// TODO Tomorrow: Merge stream buffer design
-struct MPI_SBHandler {
-  const int num_buffer = 2;
-  MPI_Request req[num_buffer];
-  void on_issue(int buffer_id, char* buffer, size_t bytes) {
-    assert(buffer_id < num_buffer);
-    MPI_Isend()
-  }
-  void on_wait(int buffer_id) {
-    assert(buffer_id < num_buffer);
-
-  }
-}
+// template <typename RequestType, typename OnUpdateCallback, size_t num_buffer = 2>
+// class PushInMemoryStreamingSBHandler : public StreamBufferHandler
+// {
+//   struct WorkRequest {
+//     bool valid;
+//     char* buffer;
+//     size_t bytes;
+//     WorkRequest() : valid(false), buffer(nullptr), bytes(0) {}
+//   };
+//   using LockGuard = std::lock_guard<std::mutex>;
+//   using UniqueLock = std::unique_lock<std::mutex>;
+// 
+//   std::mutex mu;
+//   std::condition_variable cond;
+//   bool terminate = false;
+//   int num_valid = 0;
+//   WorkRequest wr_list[num_buffer];
+//   OnUpdateCallback update_callback;
+// 
+//   void worker() {
+//     while (true) {
+//       size_t num_wrs=0;
+//       WorkRequest wrs[num_buffer];
+//       {
+//         // wait for termination or new request
+//         UniqueLock lk(mu);
+//         while (true) {
+//           cond.wait(lk);
+//           if (terminate) {
+//             lk.unlock();
+//             return;
+//           }
+//           for (size_t i=0; i<num_buffer; i++) {
+//             if (wr_list[i].valid()) {
+//               wrs[num_wrs++] = wr_list[i];
+//               wr_list[i].set_invalid();
+//               num_valid--;
+//             }
+//           }
+//           if (num_wrs > 0) {
+//             lk.unlock();
+//             break;
+//           }
+//         }
+//       }
+//       for (size_t i=0; i<num_wrs; i++) {
+//         assert(wrs[i].bytes % sizeof(RequestType) == 0);
+//         size_t num_requests = wrs[i].bytes / sizeof(RequestType);
+//         RequestType* requests = (RequestType*) wrs[i].buffer;
+//         for(size_t j=0; j<num_requests; j++) {
+//           update_callback(requests[j].)
+//         }
+//       }
+//     }
+//   }
+// public:
+//   PushInMemoryStreamingSBHandler(OnUpdateCallback&& update_callback) : update_callback(update_callback) { }
+// 
+//   void on_issue(int buffer_id, char* buffer, size_t bytes) override {
+// 
+//   }
+//   void on_wait(int buffer_id) override {
+// 
+//   }
+// };
 
 struct GraphContext {
   template <typename T>
-  struct __attribute__((packed)) GeneralUpdateRequest {
+  struct GeneralUpdateRequest {
     uint32_t y;
     T contrib;
   };
@@ -71,7 +123,6 @@ struct GraphContext {
   DefaultChannel channels[MAX_CLIENT_THREADS][MAX_UPDATER_THREADS];
   DefaultChannel to_exports[MAX_CLIENT_THREADS][MAX_EXPORT_THREADS];
   DefaultChannel from_imports[MAX_IMPORT_THREADS][MAX_UPDATER_THREADS];
-  StreamBuffer  stream_buffer[NUM_]
   volatile int* num_client_done; // number of local client done
   volatile int* num_import_done; // number of local importer done
   volatile int* num_export_done; // number of local exporter done
@@ -551,6 +602,158 @@ struct GraphContext {
       }, i, updater_socket_list[i/num_updater_threads_per_socket], num_client_threads, num_import_threads, num_client_done, num_import_done));
     }
 
+    std::thread export_threads[num_export_threads];
+    for (int i=0; i<num_export_threads; i++) {
+      export_threads[i] = std::move(std::thread([this, rank, nprocs, &graph](int tid, int socket_id, int nprocs, int num_client_threads, volatile int* client_dones, volatile int* export_dones) {
+        int ok = rivulet_numa_socket_bind(socket_id);
+        assert(ok == 0);
+        int          buf_id_list[nprocs];
+        size_t       curr_bytes_list[nprocs];
+        MPI_Request  req[nprocs][2];
+        char*        sendbuf[nprocs][2];
+        for(int p=0; p<nprocs; p++) {
+          buf_id_list[p] = 0;
+          curr_bytes_list[p] = 0;
+          for(int i=0; i<2; i++) {
+            req[p][i] = MPI_REQUEST_NULL;
+            sendbuf[p][i] = (char*) am_memalign(64, MPI_SEND_BUFFER_SIZE);
+            assert(sendbuf[p][i]);
+          }
+        }
+        while (*client_dones != num_client_threads) {
+          for(int from=0; from<num_client_threads; from++) {
+            to_exports[from][tid].poll([this, &graph, &buf_id_list, &curr_bytes_list, &req, &sendbuf](const char* ptr, size_t bytes) {
+              assert(bytes % sizeof(UpdateRequest) == 0);
+              const UpdateRequest* req_ptr = (const UpdateRequest*) ptr;
+              for(size_t offset=0; offset<bytes; offset+=sizeof(UpdateRequest)) {
+                uint64_t y = req_ptr->y;
+                int next_val_rank = graph.get_rank_from_vid(y);
+                uint32_t next_val_lid = graph.get_lid_from_vid(y);
+                UpdateRequest update_request;
+                update_request.y = next_val_lid;
+                update_request.contrib = req_ptr->contrib;
+                {
+                  int    buf_id = buf_id_list[next_val_rank];
+                  size_t curr_bytes = curr_bytes_list[next_val_rank];
+                  if (curr_bytes + sizeof(UpdateRequest) > MPI_SEND_BUFFER_SIZE) {
+                    // LINES;
+                    int flag = 0;
+                    // printf("  %d> send %zu bytes to %d\n", g_rank, curr_bytes, next_val_rank);
+                    MT_MPI_Isend(sendbuf[next_val_rank][buf_id], curr_bytes, MPI_CHAR, next_val_rank, TAG_DATA, MPI_COMM_WORLD, &req[next_val_rank][buf_id]);
+                    while (!flag) {
+                      MT_MPI_Test(&req[next_val_rank][buf_id^1], &flag, MPI_STATUS_IGNORE);
+                    }
+                    // MPI_Send(sendbuf[next_val_rank][buf_id], curr_bytes, MPI_CHAR, next_val_rank, TAG_DATA, MPI_COMM_WORLD);
+                    buf_id = buf_id ^ 1;
+                    curr_bytes = 0;
+                    curr_bytes_list[next_val_rank] = curr_bytes;
+                    buf_id_list[next_val_rank] = buf_id;
+                  }
+                  memcpy(&sendbuf[next_val_rank][buf_id][curr_bytes], &update_request, sizeof(UpdateRequest));
+                  curr_bytes += sizeof(UpdateRequest);
+                  curr_bytes_list[next_val_rank] = curr_bytes;
+                }
+                req_ptr++;
+              }
+            });
+          }
+        }
+        for (int next_val_rank=0; next_val_rank<nprocs; next_val_rank++) {
+          if (next_val_rank != rank) {
+            int    buf_id = buf_id_list[next_val_rank];
+            size_t curr_bytes = curr_bytes_list[next_val_rank];
+            int flag = 0;
+            while (!flag) {
+              MT_MPI_Test(&req[next_val_rank][buf_id], &flag, MPI_STATUS_IGNORE);
+            }
+            req[next_val_rank][buf_id] = MPI_REQUEST_NULL;
+            while (!flag) {
+              MT_MPI_Test(&req[next_val_rank][buf_id^1], &flag, MPI_STATUS_IGNORE);
+            }
+            req[next_val_rank][buf_id^1] = MPI_REQUEST_NULL;
+            MT_MPI_Send(sendbuf[next_val_rank][buf_id], curr_bytes, MPI_CHAR, next_val_rank, TAG_DATA, MPI_COMM_WORLD);
+            MT_MPI_Send(NULL, 0, MPI_CHAR, next_val_rank, TAG_CLOSE, MPI_COMM_WORLD);
+            buf_id = buf_id ^ 1;
+            curr_bytes = 0;
+            curr_bytes_list[next_val_rank] = curr_bytes;
+            buf_id_list[next_val_rank] = buf_id;
+          } else {
+            assert(curr_bytes_list[rank] == 0); // no local update via export
+          }
+        }
+        __sync_fetch_and_add(export_dones, 1);
+        printf("[Export Thread] id %d done\n", tid);
+      }, i, comm_socket_list[i/num_export_threads_per_socket], nprocs, num_client_threads, num_client_done, num_export_done));
+    }
+
+    std::thread import_threads[num_import_threads];
+    for (int i=0; i<num_import_threads; i++) {
+      import_threads[i] = std::move(std::thread([this, &graph](int tid, int socket_id, int nprocs, int num_export_threads, int num_updater_threads, volatile int* importer_num_close_request, volatile int* import_dones) {
+        int ok = rivulet_numa_socket_bind(socket_id);
+        assert(ok == 0);
+        int buf_id = 0;
+        MPI_Request req[2];
+        char* recvbuf[2];
+        short counter[MAX_UPDATER_THREADS];
+        memset(counter, 0, sizeof(counter));
+        for(int i=0; i<2; i++) {
+          recvbuf[i] = (char*) am_memalign(64, MPI_RECV_BUFFER_SIZE);
+          assert(recvbuf[i]);
+        }
+        MT_MPI_Irecv(recvbuf[buf_id], MPI_RECV_BUFFER_SIZE, MPI_CHAR, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &req[buf_id]);
+        int num_flush = 0;
+        while (true) {
+          int flag;
+          MPI_Status st;
+          MT_MPI_Test(&req[buf_id], &flag, &st);
+          if (flag) {
+            // printf("  %d> RECEIVED FROM %d\n", g_rank, st.MPI_SOURCE);
+            MT_MPI_Irecv(recvbuf[buf_id^1], MPI_RECV_BUFFER_SIZE, MPI_CHAR, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &req[buf_id^1]);
+            // int source = st.MPI_SOURCE;
+            int tag    = st.MPI_TAG;
+            int rbytes = 0;
+            MT_MPI_Get_count(&st, MPI_CHAR, &rbytes);
+            if (tag == TAG_DATA) {
+              UpdateRequest* rbuf = (UpdateRequest*) recvbuf[buf_id];
+              assert(rbytes % sizeof(UpdateRequest) == 0);
+              int rcount = rbytes / sizeof(UpdateRequest);
+              for(int i=0; i<rcount; i++) {
+                uint32_t llid = rbuf[i].y;
+                int target_tid = approx_mod.approx_mod(llid >> UPDATER_BLOCK_SIZE_PO2);
+                size_t next_bytes = from_imports[tid][target_tid].push_explicit(rbuf[i], counter[target_tid]);
+                counter[target_tid] = next_bytes;
+              }
+            } else if (tag == TAG_CLOSE) {
+              assert(rbytes == 0);
+              __sync_fetch_and_add(importer_num_close_request, 1);
+              // printf("  %d> CLOSE RECEIVED (%d/%d)\n", g_rank, *importer_num_close_request, num_export_threads * nprocs);
+            }
+            buf_id = buf_id^1;
+            // LINES;
+          }
+          if (*importer_num_close_request == num_export_threads * (nprocs-1)) {
+            num_flush++;
+            if (num_flush == 2) {
+              break;
+            }
+          }
+        }
+        // printf("  %d> IMPORT EXIT\n", g_rank);
+        MT_MPI_Cancel(&req[buf_id]);
+        for (int i=0; i<2; i++) {
+          req[i] = MPI_REQUEST_NULL;
+          am_free(recvbuf[i]);
+          recvbuf[i] = NULL;
+        }
+        for (int i=0; i<num_updater_threads; i++) {
+          size_t curr_bytes = counter[i];
+          from_imports[tid][i].flush_and_wait_explicit(curr_bytes);
+          counter[i] = 0;
+        }
+        __sync_fetch_and_add(import_dones, 1);
+      }, i, comm_socket_list[i/num_import_threads_per_socket], nprocs, num_export_threads, num_updater_threads, importer_num_close_request, num_import_done));
+    }
+
     uint64_t edges_processed_per_thread[num_client_threads];
     uint64_t frontier_num_nodes = frontier_end - frontier_begin;
     uint32_t num_chunks         = (frontier_num_nodes + chunk_size - 1)/chunk_size;
@@ -654,6 +857,36 @@ struct GraphContext {
       printf(">>> client load imbalance = %lf\n", (1.0*global_max_ep)/(1.0*global_sum_ep/nprocs/num_client_threads));
     }
   }
+
+//   template <typename ValueT, typename OnUpdateT, typename GraphType, typename VertexIterator, typename VertexValueCallback, typename OnUpdateGen>
+//   void compute_push_in_memory_stream(GraphType& graph, VertexIterator frontier_begin, VertexIterator frontier_end, VertexValueCallback vertex_value_op, OnUpdateGen& on_update_gen, uint32_t chunk_size) {
+//     assert(graph.nprocs() == 1);
+//     size_t num_nodes = graph.total_num_nodes();
+//     #pragma omp parallel
+//     {
+// 
+//       uint32_t num_parts = num_nodes/chunk_size;
+//       #pragma omp for schedule(dynamic, 1)
+//       for (uint32_t part_id=0; part_id<num_parts; part_id++) {
+//         uint32_t chunk_begin = part_id*chunk_size;
+//         uint32_t chunk_end;
+//         if (part_id == num_parts - 1) {
+//           chunk_end = num_nodes;
+//         } else {
+//           chunk_end = (part_id+1)*chunk_size;
+//         }
+//         for(uint32_t i=chunk_begin; i<chunk_end; i++) {
+//           uint64_t from = graph._index[i];
+//           uint64_t to   = graph._index[i+1];
+//           VertexT  contrib = curr_val[i];
+//           for (uint64_t idx=from; idx<to; idx++) {
+//             uint32_t y = graph._edges[idx];
+//             update_op(&next_val[y], contrib);
+//           }
+//         }
+//       }
+//     }
+//   }
 
   template <typename NodeT, typename IndexT, typename VertexT, typename UpdateCallback>
   void edge_map_smp_pull(SharedGraph<NodeT, IndexT>& graph_t, VertexT* curr_val, VertexT* next_val, uint32_t chunk_size, const UpdateCallback& update_op) {

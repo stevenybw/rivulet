@@ -10,40 +10,6 @@
 #include "util.h"
 #include "garray.h"
 
-#define MPI_DEBUG
-
-#ifdef MPI_DEBUG
-#define assert(COND) do{if(!(COND)) {printf("ASSERTION VIOLATED, PROCESS pid = %d PAUSED\n", getpid()); while(1);}}while(0)
-static void MPI_Comm_err_handler_function(MPI_Comm* comm, int* errcode, ...) {
-  assert(0);
-}
-#define LINES do{printf("  %d> %s:%d\n", g_rank, __FUNCTION__, __LINE__);}while(0)
-static void signal_handler(int sig) {
-  printf("SIGNAL %d ENCOUNTERED, PROCESS pid = %d PAUSED\n", sig, getpid());
-  while(true);
-}
-void init_debug() {
-  MPI_Errhandler errhandler;
-  MPI_Comm_create_errhandler(&MPI_Comm_err_handler_function,  &errhandler);
-  MPI_Comm_set_errhandler(MPI_COMM_WORLD, errhandler);
-
-  struct sigaction act;
-  memset(&act, 0, sizeof(struct sigaction));
-  act.sa_handler = signal_handler;
-  sigaction(9, &act, NULL);
-  sigaction(11, &act, NULL);
-}
-#else
-void init_debug() {}
-#endif
-
-inline uint64_t currentTimeUs()
-{
-  struct timeval tv;
-  gettimeofday(&tv, NULL);
-  return tv.tv_usec + 1000000 * tv.tv_sec;
-}
-
 const double alpha = 0.15;
 
 // const uint64_t g_chunk_size = 64;
@@ -60,6 +26,7 @@ int g_nprocs = 1;
 #define RUN_MODE_PUSH 0
 #define RUN_MODE_PULL 1
 #define RUN_MODE_DELEGATION_PWQ 2
+#define RUN_MODE_IN_MEMORY_STREAM 3
 
 // enum GraphType { GRAPH_TYPE_SHARED=1, GRAPH_TYPE_DISTRIBUTED=2 };
 

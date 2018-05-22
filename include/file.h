@@ -110,7 +110,7 @@ struct MappedFile {
     }
     int fd = ::open(path, open_flags);
     if (fd < 0) {
-      cout << "cannot open file " << path;
+      cout << "cannot open file " << path << endl;
       assert(false);
     }
     size_t bytes = lseek(fd, 0, SEEK_END);

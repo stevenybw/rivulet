@@ -1,9 +1,24 @@
+#ifndef STREAM_BUFFER_H
+#define STREAM_BUFFER_H
+
+#include <utility>
+
+#include <pthread.h>
+
+#include "util.h"
+
 /*
  * Stream Buffer Implementation
  *
  * Copyright 2018 Bowen Yu, Tsinghua University
  * 
  */
+
+class StreamBufferHandler {
+public:
+  virtual void on_issue(int buffer_id, char* buffer, size_t bytes)=0;
+  virtual void on_wait(int buffer_id)=0;
+};
 
 /*! \brief StreamBuffer<T> provides an abstraction for multiple threads streaming write and process.
  *  Multiple producers may call update
@@ -17,9 +32,8 @@
  *  push(ctx, elem)   push an element to the streaming buffer
  *  flush(ctx)
  */
-template <typename T,
-          typename HandlerType,
-          size_t num_buffers = 2;
+template <typename HandlerType,
+          size_t num_buffers = 2,
           size_t minibatch_buffer_size_per_partition=4096>
 class StreamBuffer
 {
@@ -50,6 +64,17 @@ public:
     }
   };
 
+  StreamBuffer() : capacity(0), buffer_pool {nullptr}, buffer_pool_consumed(0), buffer_pool_produced(0), active_buffer(nullptr), size(nullptr) {}
+  StreamBuffer(StreamBuffer&& buffer) {
+    std::swap(capacity, buffer.capacity);
+    std::swap(handler, buffer.handler);
+    std::swap(buffer_pool, buffer.buffer_pool);
+    std::swap(buffer_pool_consumed, buffer.buffer_pool_consumed);
+    std::swap(buffer_pool_produced, buffer.buffer_pool_produced);
+    std::swap(active_buffer, buffer.active_buffer);
+    std::swap(size, buffer.size);
+  }
+
   /*! \brief Initialize the stream buffer with specified capacity in bytes
    */
   StreamBuffer(size_t capacity, HandlerType&& handler) : capacity(capacity), handler(handler) {
@@ -65,9 +90,13 @@ public:
 
   ~StreamBuffer() {
     for(uint64_t i=0; i<num_buffers; i++) {
-      memory::free(buffer_pool[i]);
+      if (buffer_pool[i] != nullptr) {
+        memory::free(buffer_pool[i]);
+      }
     }
-    memory::free(size);
+    if (size != nullptr) {
+      memory::free(size);
+    }
   }
 
   void on_issue(int buffer_id, char* buffer, size_t bytes) { handler.on_issue(buffer_id, buffer, bytes); }
@@ -99,7 +128,7 @@ label_retry:
         (*size) = 0; // enable access
       } else { // follower
         // master process done when (*size) <= capacity
-        wait_for([size](){return ((*size) <= capacity);});
+        wait_for([this](){return ((*size) <= capacity);});
       }
       goto label_retry; // because it does not have effects, it is safe to retry
     } else {
@@ -111,6 +140,7 @@ label_retry:
 
   /*! \brief Push elem into the buffer
    */
+  template <typename T>
   int push(ThreadContext& ctx, const T& elem) {
     if (ctx.get_bytes() + sizeof(elem) <= minibatch_buffer_size_per_partition) {
       ctx.append_checked(&elem, sizeof(elem));
@@ -150,3 +180,5 @@ label_retry:
     active_buffer = buffer_pool[0];
   }
 };
+
+#endif

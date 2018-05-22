@@ -290,7 +290,7 @@ struct Driver
         file.unlink();
       } else if (obj_req.obj_type() == ObjectRequirement::OBJECT_PERSIST) {
         is_persist = true;
-        fullname = obj_req.fullname();
+        fullname = filename_append_postfix(obj_req.fullname(), rank, nprocs);
         file.create(fullname.c_str(), local_capacity);
         file.open(fullname.c_str(), FILE_MODE_READ_WRITE, ACCESS_PATTERN_NORMAL);
       } else {
@@ -314,8 +314,7 @@ struct Driver
       garr->resize(new_size); 
       return garr;
     } else if (obj_req.req_type() == ObjectRequirement::TYPE_LOAD) {
-      string fullname = obj_req.fullname();
-      fullname = obj_req.fullname(); 
+      string fullname = filename_append_postfix(obj_req.fullname(), rank, nprocs);
       MappedFile file;
       file.open(fullname.c_str(), FILE_MODE_READ_ONLY, ACCESS_PATTERN_NORMAL);
       // resize not allowed here

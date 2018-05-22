@@ -28,6 +28,20 @@ using namespace std;
 
 const size_t partition_id_bits = 1;
 
+// struct PageRankPushUpdater {
+//   double* curr_val;
+//   double* next_val;
+//   double vertex_value(VertexId u) override { return curr_val[u]; }
+//   void process_update(VertexId v, double contrib) { next_val[u] += contrib; }
+// };
+// 
+// struct PageRankPullUpdater {
+//   double* curr_val;
+//   double* next_val;
+//   double vertex_value(VertexId u) override { return curr_val[u]; }
+//   void process_update(VertexId v, double contrib) { Atomic<double>::cas_atomic_update(&next_val[v], contrib); }
+// };
+
 int main(int argc, char* argv[]) {
   uint64_t duration;
   int required_level = MPI_THREAD_SERIALIZED;

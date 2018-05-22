@@ -15,12 +15,23 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <mutex>
 #include <string>
 
 using namespace std;
 
+#define MPI_DEBUG
+
+#ifdef MPI_DEBUG
+#define assert(COND) do{if(!(COND)) {printf("ASSERTION VIOLATED, PROCESS pid = %d PAUSED\n", getpid()); while(1);}}while(0)
+#endif
+
+void init_debug();
+
 void  am_free(void* ptr);
 void* am_memalign(size_t align, size_t size);
+uint64_t currentTimeUs();
+string filename_append_postfix(string filename, int rank, int nprocs);
 bool  is_power_of_2(uint64_t num);
 void* malloc_pinned(size_t size);
 void  memcpy_nts(void* dst, const void* src, size_t bytes);
@@ -29,6 +40,15 @@ void interleave_memory(void* ptr, size_t size, size_t chunk_size, int* node_list
 void pin_memory(void* ptr, size_t size);
 int  rivulet_numa_socket_bind(int socket_id);
 void rivulet_yield();
+
+namespace memory {
+  /*! \brief Allocate a memory region that is shared by multiple threads
+   *
+   *  To avoid false sharing, we align the resulting array in cacheline
+   */
+  void* allocate_shared_rw(size_t bytes);
+  void free(void* ptr);
+};
 
 extern std::mutex mu_mpi_routine;
 using LockGuard = std::lock_guard<std::mutex>;

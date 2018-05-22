@@ -40,25 +40,24 @@ int main(int argc, char* argv[]) {
   g_rank = rank;
   g_nprocs = nprocs;
 
-  if (argc < 8) {
-    cerr << "Usage: " << argv[0] << " <graph_path> <graph_t_path> <run_mode> <num_iters> <num_threads> <chunk_size> <tmp_path>" << endl;
+  if (argc != 6) {
+    cerr << "Usage: " << argv[0] << " <graph_path> <graph_t_path> <run_mode> <num_iters> <chunk_size>" << endl;
     return -1;
   }
   string graph_path = argv[1];
   string graph_t_path = argv[2];
   string run_mode = argv[3];
   int num_iters = atoi(argv[4]);
-  int num_threads = atoi(argv[5]);
-  uint32_t chunk_size = atoi(argv[6]);
-  string tmp_path = argv[7];
+  uint32_t chunk_size = atoi(argv[5]);
 
   if (rank == 0) {
     cout << "  graph_path = " << graph_path << endl;
     cout << "  graph_t_path = " << graph_t_path << endl;
     cout << "  run_mode = " << run_mode << endl;
     cout << "  num_iters = " << num_iters << endl;
-    cout << "  num_threads = " << num_threads << endl;
   }
+
+  assert(nprocs == 1);
 
   int run_mode_i;
   if (run_mode == "push") {
@@ -69,22 +68,26 @@ int main(int argc, char* argv[]) {
     run_mode_i = RUN_MODE_PULL;
   } else if (run_mode == "delegation_pwq") {
     run_mode_i = RUN_MODE_DELEGATION_PWQ;
+  } else if (run_mode == "in_memory_stream") {
+    run_mode_i = RUN_MODE_IN_MEMORY_STREAM;
   } else {
-    cerr << "run mode must be: push, pull, delegation_pwq" << endl;
+    cerr << "run mode must be: push, pull, delegation_pwq, in_memory_stream" << endl;
     return -1;
   }
 
-  Driver* driver = new Driver(MPI_COMM_WORLD, new ObjectPool(tmp_path));
+  Configuration env_config;
+  ExecutionContext ctx(env_config.nvm_off_cache_pool_dir, env_config.nvm_off_cache_pool_dir, env_config.nvm_on_cahce_pool_dir, MPI_COMM_WORLD);
+  Driver* driver = new Driver(ctx);
   REGION_BEGIN();
   ConfigFile config(graph_path + ".config");
   uint64_t total_num_nodes = config.get_uint64("total_num_nodes");
   uint64_t total_num_edges = config.get_uint64("total_num_edges");
-  GArray<uint32_t>* edges = driver->load_array<uint32_t>(graph_path + ".edges", ObjectMode(UNIFORMITY_UNIFORM_OBJECT, WRITABILITY_READ_ONLY));
-  GArray<uint64_t>* index = driver->load_array<uint64_t>(graph_path + ".index", ObjectMode(UNIFORMITY_UNIFORM_OBJECT, WRITABILITY_READ_ONLY));
+  GArray<uint32_t>* edges = driver->create_array<uint32_t>(ObjectRequirement::load_from(graph_path + ".edges"));
+  GArray<uint64_t>* index = driver->create_array<uint64_t>(ObjectRequirement::load_from(graph_path + ".index"));
   assert(edges->size() == total_num_edges);
   assert(index->size() == (total_num_nodes+1));
-  GArray<uint32_t>* edges_t = driver->load_array<uint32_t>(graph_t_path + ".edges", ObjectMode(UNIFORMITY_UNIFORM_OBJECT, WRITABILITY_READ_ONLY));
-  GArray<uint64_t>* index_t = driver->load_array<uint64_t>(graph_t_path + ".index", ObjectMode(UNIFORMITY_UNIFORM_OBJECT, WRITABILITY_READ_ONLY));
+  GArray<uint32_t>* edges_t = driver->create_array<uint32_t>(ObjectRequirement::load_from(graph_t_path + ".edges"));
+  GArray<uint64_t>* index_t = driver->create_array<uint64_t>(ObjectRequirement::load_from(graph_t_path + ".index"));
   assert(edges_t->size() == total_num_edges);
   assert(index_t->size() == (total_num_nodes+1));
   SharedGraph<uint32_t, uint64_t> graph(rank, nprocs, edges, index);
@@ -95,10 +98,8 @@ int main(int argc, char* argv[]) {
   assert(graph.total_num_edges() == graph_t.total_num_edges());
   REGION_END("Graph Load");
 
-  if (rank == 0) {
-    printf("  total_num_nodes = %llu\n", total_num_nodes);
-    printf("  total_num_edges = %llu\n", total_num_edges);
-  }
+  printf("  total_num_nodes = %llu\n", total_num_nodes);
+  printf("  total_num_edges = %llu\n", total_num_edges);
 
   size_t num_nodes = graph.local_num_nodes();
   LINES;
@@ -136,6 +137,8 @@ int main(int argc, char* argv[]) {
       graph_context.edge_map_smp_pull(graph_t, src, next_val, chunk_size, [](double* next_val, double contrib){*next_val += contrib;});
     } else if (run_mode_i == RUN_MODE_DELEGATION_PWQ) {
       graph_context.edge_map(graph, src, next_val, chunk_size, [](double* next_val, double contrib){*next_val += contrib;});
+    } else if (run_mode_i == RUN_MODE_IN_MEMORY_STREAM) {
+      graph_context.edge_map_
     }
 
     MPI_Barrier(MPI_COMM_WORLD);

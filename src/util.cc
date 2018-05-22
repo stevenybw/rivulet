@@ -6,11 +6,40 @@
 #include <sched.h>
 #include <time.h>
 
+#include <mpi.h>
+#include <signal.h>
+
 #include "util.h"
 
 void* pages[128*1024];
 int nodes[128*1024];
 int statuses[128*1024];
+
+#ifdef MPI_DEBUG
+
+static void MPI_Comm_err_handler_function(MPI_Comm* comm, int* errcode, ...) {
+  assert(0);
+}
+
+static void signal_handler(int sig) {
+  printf("SIGNAL %d ENCOUNTERED, PROCESS pid = %d PAUSED\n", sig, getpid());
+  while(true);
+}
+
+void init_debug() {
+  MPI_Errhandler errhandler;
+  MPI_Comm_create_errhandler(&MPI_Comm_err_handler_function,  &errhandler);
+  MPI_Comm_set_errhandler(MPI_COMM_WORLD, errhandler);
+
+  struct sigaction act;
+  memset(&act, 0, sizeof(struct sigaction));
+  act.sa_handler = signal_handler;
+  sigaction(9, &act, NULL);
+  sigaction(11, &act, NULL);
+}
+#else
+void init_debug() {}
+#endif
 
 void am_free(void* ptr) {
   free(ptr);
@@ -21,6 +50,17 @@ void* am_memalign(size_t align, size_t size) {
   int ok = posix_memalign(&ptr, align, size);
   assert(ok == 0);
   return ptr;
+}
+
+uint64_t currentTimeUs()
+{
+  struct timeval tv;
+  gettimeofday(&tv, NULL);
+  return tv.tv_usec + 1000000 * tv.tv_sec;
+}
+
+string filename_append_postfix(string filename, int rank, int nprocs) {
+  return filename + "." + to_string(rank) + "." + to_string(nprocs);
 }
 
 bool is_power_of_2(uint64_t num) {
@@ -44,20 +84,37 @@ void* malloc_pinned(size_t size) {
   return ptr;
 }
 
+// void memcpy_nts(void* dst, const void* src, size_t bytes) {
+//   if (bytes == 16) {
+//     _mm_stream_pd((double*)dst, *((const __m128d*)src));
+//   } else {
+//     __m256i* dst_p = (__m256i*) dst;
+//     const __m256i* src_p = (const __m256i*) src;
+//     size_t off = 0;
+//     // _mm_stream_ps((float*) &(_window->data[seq][curr_bytes]), *((__m128*) &data));
+//     for(; off<bytes; off+=32) {
+//       _mm256_stream_si256(dst_p, *src_p);
+//       dst_p++;
+//       src_p++;
+//     }
+//   }
+// }
+
+inline static void* align_left(void* ptr, size_t index) {
+  uintptr_t ptr_val = (uintptr_t) ptr;
+  ptr_val = ((ptr_val >> index) << index);
+  return (void*)ptr_val;
+}
+
+inline static void* align_right(void* ptr, size_t index) {
+  uintptr_t ptr_val = (uintptr_t) ptr;
+  size_t mask = (1LL << index) - 1;
+  ptr_val = ((ptr_val+mask)&(~mask));
+  return (void*)ptr_val;
+}
+
 void memcpy_nts(void* dst, const void* src, size_t bytes) {
-  if (bytes == 16) {
-    _mm_stream_pd((double*)dst, *((const __m128d*)src));
-  } else {
-    __m256i* dst_p = (__m256i*) dst;
-    const __m256i* src_p = (const __m256i*) src;
-    size_t off = 0;
-    // _mm_stream_ps((float*) &(_window->data[seq][curr_bytes]), *((__m128*) &data));
-    for(; off<bytes; off+=32) {
-      _mm256_stream_si256(dst_p, *src_p);
-      dst_p++;
-      src_p++;
-    }
-  }
+  
 }
 
 void interleave_memory(void* ptr, size_t size, size_t chunk_size, int* node_list, int num_nodes) {
@@ -87,12 +144,27 @@ void pin_memory(void* ptr, size_t size) {
 }
 
 int  rivulet_numa_socket_bind(int socket_id) {
-  return numa_run_on_node(socket_id);
+  //return numa_run_on_node(socket_id);
+  return 0;
 }
 
 void rivulet_yield() {
   sched_yield();
 }
+
+namespace memory {
+  void* allocate_shared_rw(size_t bytes) {
+    void* ptr = NULL;
+    int ok = posix_memalign(&ptr, 64, bytes);
+    assert(ok == 0);
+    assert(ptr != NULL);
+    return ptr;
+  }
+
+  void free(void* ptr) {
+    free(ptr);
+  }
+};
 
 std::mutex mu_mpi_routine;
 

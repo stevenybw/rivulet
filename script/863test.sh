@@ -49,6 +49,7 @@ mpirun --bind-to none -n 2 -host ${HOSTS} ./graph_preprocess ${INPUT_GRAPH_PATH}
 
 # PageRank
 mpirun --bind-to none -n 2 -host ${HOSTS} ./page_rank_distributed ${OUTPUT_GRAPH_PATH} ${NUM_ITERS} ${CHUNK_SIZE}
+mpirun -report-bindings -bind-to socket -npersocket 1 -- ./page_rank_distributed ${OUTPUT_GRAPH_PATH} ${NUM_ITERS} ${CHUNK_SIZE}
 
 # BFS从0号顶点开始
 mpirun --bind-to none -n 2 -host ${HOSTS} ./bfs_distributed ${OUTPUT_GRAPH_PATH} ${NUM_ITERS} ${CHUNK_SIZE} 0 0
