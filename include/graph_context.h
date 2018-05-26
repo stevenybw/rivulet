@@ -45,7 +45,9 @@ struct Memcpy<GeneralUpdateRequest<uint32_t, double>>
   }
 
   static void PrefetchNTA(const GeneralUpdateRequest<uint32_t, double>* destptr) {
-    _mm_prefetch(&destptr, _MM_HINT_T0);
+    _mm_prefetch(&destptr[0], _MM_HINT_T0);
+    _mm_prefetch(&destptr[4], _MM_HINT_T1);
+    // _mm_prefetch(&destptr[4], _MM_HINT_T1);
     // _mm_prefetch(&destptr[8], _MM_HINT_T0);
     // _mm_prefetch(&destptr[12], _MM_HINT_T0);
     // for (int i=0; i<num_element; i+=8) {
