@@ -15,6 +15,10 @@ void* pages[128*1024];
 int nodes[128*1024];
 int statuses[128*1024];
 
+uint64_t g_begin_ts;
+int g_rank = 0;
+int g_nprocs = 1;
+
 #ifdef MPI_DEBUG
 
 static void MPI_Comm_err_handler_function(MPI_Comm* comm, int* errcode, ...) {
@@ -50,6 +54,19 @@ void* am_memalign(size_t align, size_t size) {
   int ok = posix_memalign(&ptr, align, size);
   assert(ok == 0);
   return ptr;
+}
+
+uint64_t currentAbsoluteTimestamp() {
+  unsigned hi, lo;
+  asm volatile ("CPUID\n\t"
+      "RDTSC\n\t"
+      "mov %%edx, %0\n\t"
+      "mov %%eax, %1\n\t": "=r" (hi), "=r" (lo) : : "%rax", "%rbx", "%rcx", "%rdx");
+  return ((uint64_t) hi << 32) | lo;
+}
+
+uint64_t currentTimestamp() {
+  return currentAbsoluteTimestamp() - g_begin_ts;
 }
 
 uint64_t currentTimeUs()
@@ -162,11 +179,66 @@ namespace memory {
   }
 
   void free(void* ptr) {
-    free(ptr);
+    ::free(ptr);
   }
 };
 
 std::mutex mu_mpi_routine;
+
+void RV_Init()
+{
+  #ifdef MULTITHREAD
+  int required_level = MPI_THREAD_MULTIPLE;
+  #else
+  int required_level = MPI_THREAD_SERIALIZED;
+  #endif
+
+  int provided_level;
+  MPI_Init_thread(NULL, NULL, required_level, &provided_level);
+  assert(provided_level >= required_level);
+  MPI_Comm_rank(MPI_COMM_WORLD, &g_rank);
+  MPI_Comm_size(MPI_COMM_WORLD, &g_nprocs);
+  g_begin_ts = currentAbsoluteTimestamp();
+}
+
+void RV_Finalize()
+{
+  MPI_Finalize();
+}
+
+#ifdef MULTITHREAD
+
+int MT_MPI_Cancel(MPI_Request *request)
+{
+  return MPI_Cancel(request);
+}
+
+int MT_MPI_Get_count(const MPI_Status *status, MPI_Datatype datatype, int *count)
+{
+  return MPI_Get_count(status, datatype, count);
+}
+
+int MT_MPI_Isend(const void *buf, int count, MPI_Datatype datatype, int dest, int tag, MPI_Comm comm, MPI_Request *request)
+{
+  return MPI_Isend(buf, count, datatype, dest, tag, comm, request);
+}
+
+int MT_MPI_Irecv(void *buf, int count, MPI_Datatype datatype, int source, int tag, MPI_Comm comm, MPI_Request *request)
+{
+  return MPI_Irecv(buf, count, datatype, source, tag, comm, request);
+}
+
+int MT_MPI_Test(MPI_Request *request, int *flag, MPI_Status *status)
+{
+  return MPI_Test(request, flag, status);
+}
+
+int MT_MPI_Send(const void *buf, int count, MPI_Datatype datatype, int dest, int tag, MPI_Comm comm) 
+{
+  return MPI_Send(buf, count, datatype, dest, tag, comm);
+}
+
+#else
 
 int MT_MPI_Cancel(MPI_Request *request)
 {
@@ -208,3 +280,5 @@ int MT_MPI_Send(const void *buf, int count, MPI_Datatype datatype, int dest, int
   }
   return MPI_SUCCESS;
 }
+
+#endif

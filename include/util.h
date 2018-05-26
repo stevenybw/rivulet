@@ -5,6 +5,7 @@
 
 #include <immintrin.h>
 #include <mpi.h>
+#include <sched.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -13,12 +14,26 @@
 #include <unistd.h>
 
 #include <fstream>
+#include <initializer_list>
 #include <iostream>
 #include <map>
 #include <mutex>
 #include <string>
+#include <vector>
 
 using namespace std;
+
+const size_t partition_id_bits = 2;
+
+/*! \brief If MPI_THREAD_MULTIPLE is supported
+ *
+ *  Detailed description starts here
+ */
+// #define MULTITHREAD
+
+extern uint64_t g_begin_ts;
+extern int g_rank;
+extern int g_nprocs;
 
 #define MPI_DEBUG
 
@@ -30,7 +45,23 @@ void init_debug();
 
 void  am_free(void* ptr);
 void* am_memalign(size_t align, size_t size);
+
+/*! \brief Current absolute timestamp
+ *
+ */
+uint64_t currentAbsoluteTimestamp();
+
+/*! \brief Current relative timestamp
+ *
+ */
+uint64_t currentTimestamp();
+
+/*! \brief Current timestamp in us
+ *
+ *  Detailed description starts here
+ */
 uint64_t currentTimeUs();
+
 string filename_append_postfix(string filename, int rank, int nprocs);
 bool  is_power_of_2(uint64_t num);
 void* malloc_pinned(size_t size);
@@ -40,6 +71,13 @@ void interleave_memory(void* ptr, size_t size, size_t chunk_size, int* node_list
 void pin_memory(void* ptr, size_t size);
 int  rivulet_numa_socket_bind(int socket_id);
 void rivulet_yield();
+
+/*! \brief Initialize rivulet
+ *
+ *  MPI_Init is implied this call
+ */
+void RV_Init();
+void RV_Finalize();
 
 namespace memory {
   /*! \brief Allocate a memory region that is shared by multiple threads
@@ -82,6 +120,68 @@ struct ApproxMod {
   // approximate num % modular
   uint8_t approx_mod(uint64_t num) {
     return _table[num & (num_elem-1)];
+  }
+};
+
+struct CommandLine
+{
+  int     argc;
+  char**  argv;
+  int     num_positional;
+  std::vector<char*>  value_names;
+  std::vector<char*>  default_values;
+
+  char* getValue(int index) {
+    assert(index < num_positional);
+    if (index+1 < argc) {
+      return argv[index+1];
+    } else {
+      if (default_values[index] == nullptr) {
+        printf("positional argument %d is required but not provided\n", index);
+        printUsage();
+        assert(false);
+      }
+      return default_values[index];
+    }
+  }
+
+  bool contains(string val) {
+    for(int i=1; i<argc; i++) {
+      if (val == argv[i]) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  void printUsage() {
+    printf("Usage\n");
+    printf("  %s", argv[0]);
+    for (int i=0; i<num_positional; i++) {
+      assert(value_names[i] != nullptr);
+      if (default_values[i] == nullptr) {
+        printf(" <!%s>", value_names[i]);
+      } else {
+        printf(" <%s>=(%s)", value_names[i], default_values[i]);
+      }
+    }
+    printf("\n");
+  }
+
+  /*! \brief given argc and argv, expect num_positional arguments, their default values is given in default_values,
+   *         which must be an array equal to num_positional, and nullptr if it is required.
+   *
+   */
+  CommandLine(int argc, char* argv[], int num_positional, std::initializer_list<char*> value_names, std::initializer_list<char*> default_values) : argc(argc), argv(argv), num_positional(num_positional), value_names(value_names), default_values(default_values) {
+    if (contains("-help") || contains("--help")) {
+      printUsage();
+      exit(1);
+    }
+    assert(num_positional == value_names.size());
+    assert(value_names.size() == default_values.size());
+    for(int i=0; i<num_positional; i++) {
+      getValue(i);
+    }
   }
 };
 
@@ -332,6 +432,7 @@ template <typename Pred>
 void wait_for(Pred pred) {
   //volatile uint64_t duration = 1024;
   while(!pred()) {
+    // sched_yield();
     //for(uint64_t i=0; i<duration; i++);
     //duration *= 2;
   }

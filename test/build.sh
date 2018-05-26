@@ -1,0 +1,2 @@
+#g++ -std=c++14 -pthread -O0 -g -I../include -o test_fs_monitor test_fs_monitor.cc
+mpicxx -std=c++14 -pthread -O2 -g -I../include -o test_stream_buffer_mpi test_stream_buffer_mpi.cc ../src/util.cc -lnuma
