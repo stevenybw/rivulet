@@ -6,6 +6,7 @@
 #include <immintrin.h>
 #include <mpi.h>
 #include <sched.h>
+#include <malloc.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -437,5 +438,55 @@ void wait_for(Pred pred) {
     //duration *= 2;
   }
 }
+
+/*! \brief A Memory Pool for Thread Local Variables
+ *
+ *  I've been confused about if it would be better to prefer heap rather than stack
+ *  because I've seen misterious LLC-store-miss of a stack variable. 
+ */
+struct ThreadLocalMemoryPool
+{
+  size_t pos;
+  size_t capacity;
+  char*  data;
+
+  ThreadLocalMemoryPool(size_t capacity) : pos(0), capacity(capacity) {
+    data = (char*) memalign(4096, capacity);
+    assert(data != nullptr);
+  }
+
+  /*! \brief Allocate num_element T
+   */
+  template <typename T>
+  T* alloc(size_t num_element, size_t alignment=sizeof(T)) {
+    size_t bytes = num_element * sizeof(T);
+    pos = (pos + alignment - 1) / alignment * alignment;
+    assert(pos % alignment == 0); // alignment
+    T* ptr = (T*) &data[pos];
+    pos += bytes;
+    assert(pos <= capacity);
+    return ptr;
+  }
+};
+
+template <typename T>
+struct TypeTrait { 
+};
+
+template <>
+struct TypeTrait<uint64_t> { 
+  static MPI_Datatype getMPIType() { return MPI_UNSIGNED_LONG_LONG; } 
+  static uint64_t getMinValue() { return 0; }
+  static uint64_t getZeroValue() { return 0; }
+  static uint64_t getMaxValue() { return -1; }
+};
+
+template <>
+struct TypeTrait<double> { 
+  static MPI_Datatype getMPIType() { return MPI_DOUBLE; } 
+  static double getMinValue() { return -1e99; }
+  static double getZeroValue() { return 0.0; }
+  static double getMaxValue() { return 1e99; }
+};
 
 #endif
