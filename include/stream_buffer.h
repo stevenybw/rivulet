@@ -200,7 +200,7 @@ label_retry:
    */
   template <typename T>
   int push(ThreadContext& ctx, const T& elem) {
-    if (ctx.get_bytes() + sizeof(elem) <= minibatch_buffer_size_per_partition) {
+    if (ctx.get_bytes() + sizeof(elem) <= minibatch_buffer_size_per_partition) { // CANDIDATE 1
       ctx.append_checked(&elem, sizeof(elem));
     } else {
       writeback_thread_context(ctx);

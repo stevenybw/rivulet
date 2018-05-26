@@ -8,8 +8,6 @@
 
 using namespace std;
 
-const size_t partition_id_bits = 1;
-
 template <typename T>
 struct Queue {
   struct Iterator {

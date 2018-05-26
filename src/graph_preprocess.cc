@@ -10,10 +10,9 @@
 
 using namespace std;
 
-const size_t partition_id_bits = 1;
-
-const size_t remap_chunk_size_po2 = 6; // 64
-const size_t remap_chunk_size     = (1LL << remap_chunk_size_po2);
+// const size_t remap_chunk_size_po2 = 6; // 64
+// const size_t remap_chunk_size     = (1LL << remap_chunk_size_po2);
+size_t remap_chunk_size = 0;
 
 // number of partition offset bits in real representation
 const size_t partition_offset_bits = 8 * sizeof(uint32_t) - partition_id_bits;
@@ -73,7 +72,6 @@ struct EqualVertexRemapNodeIdMapFn : public MapFn<pair<uint32_t, uint32_t>, pair
 };
 
 const char* METHOD_EQUAL_VERTEX = "equal_vertex"; 
-const char* METHOD_EQUAL_VERTEX = "equal_edges"; 
 const char* METHOD_CHUNK_ROUNDROBIN = "chunkroundrobin";
 
 int main(int argc, char* argv[])
@@ -88,12 +86,13 @@ int main(int argc, char* argv[])
   int rank, nprocs;
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
   MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
+  omp_set_nested(1);
 
   g_rank = rank;
   g_nprocs = nprocs;
 
   if (argc < 4) {
-    cerr << "Usage: " << argv[0] << " <input_graph_path in NFS> <output_graph_path> <method>" << endl;
+    cerr << "Usage: " << argv[0] << " <input_graph_path in NFS> <output_graph_path> <method> <parameter>" << endl;
     cerr << "  method: {equal_vertex, equal_edges, chunkroundrobin}" << endl;
     return -1;
   }
@@ -116,6 +115,9 @@ int main(int argc, char* argv[])
   }
   GArray<pair<uint32_t, uint32_t>>* graph_tuples_remapped = NULL;
   if (method == METHOD_CHUNK_ROUNDROBIN) {
+    assert(argc == 5);
+    remap_chunk_size = atoll(argv[4]);
+    printf("Remap Chunk Size = %zu\n", remap_chunk_size);
     RemapNodeIdMapFn remap_fn(rank, nprocs);
     graph_tuples_remapped = driver->map(graph_tuples, remap_fn, ObjectRequirement::create_transient(Object::NVM_ON_CACHE)); // MPI does not support DAX...
   } else if (method == METHOD_EQUAL_VERTEX) {

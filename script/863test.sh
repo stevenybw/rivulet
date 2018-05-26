@@ -12,6 +12,14 @@ HOSTS="phoenix00,phoenix01"
 NUM_ITERS=10
 CHUNK_SIZE=512
 
+INPUT_GRAPH_PATH=~/Dataset/uk-2007-05
+OUTPUT_GRAPH_PATH=/mnt/pmem0/uk-2007-05
+UNBALANCED_GRAPH_PATH=/mnt/pmem0/uk-2007-05-unbalanced
+LOG=./result
+HOSTS="phoenix00,phoenix01"
+NUM_ITERS=10
+CHUNK_SIZE=512
+
 
 mkdir ${LOG}
 
@@ -50,6 +58,17 @@ mpirun --bind-to none -n 2 -host ${HOSTS} ./graph_preprocess ${INPUT_GRAPH_PATH}
 # PageRank
 mpirun --bind-to none -n 2 -host ${HOSTS} ./page_rank_distributed ${OUTPUT_GRAPH_PATH} ${NUM_ITERS} ${CHUNK_SIZE}
 mpirun -report-bindings -bind-to socket -npersocket 1 -- ./page_rank_distributed ${OUTPUT_GRAPH_PATH} ${NUM_ITERS} ${CHUNK_SIZE}
+mpirun --bind-to none -n 2 -host ${HOSTS} ./page_rank_distributed ${OUTPUT_GRAPH_PATH} ${NUM_ITERS} ${CHUNK_SIZE}
+
+# Two Process PageRank
+mpirun --bind-to socket -npernode 1 --hostfile hostfile.txt -- ./page_rank_distributed ${OUTPUT_GRAPH_PATH} 4 ${CHUNK_SIZE}
+mpirun --bind-to socket -npernode 1 --hostfile hostfile.txt -- ./page_rank_distributed ${UNBALANCED_GRAPH_PATH} 4 ${CHUNK_SIZE}
+
+# Balanced 4 process
+mpirun --bind-to socket -npersocket 1 --hostfile hostfile.txt ./page_rank_distributed ${OUTPUT_GRAPH_PATH} ${NUM_ITERS} ${CHUNK_SIZE}
+
+# Unbalanced 4 process
+mpirun --bind-to socket -npersocket 1 --hostfile hostfile.txt ./page_rank_distributed ${UNBALANCED_GRAPH_PATH} ${NUM_ITERS} ${CHUNK_SIZE}
 
 # BFS从0号顶点开始
 mpirun --bind-to none -n 2 -host ${HOSTS} ./bfs_distributed ${OUTPUT_GRAPH_PATH} ${NUM_ITERS} ${CHUNK_SIZE} 0 0
@@ -61,5 +80,10 @@ mpirun --bind-to none -n 2 -host phoenix00,phoenix01 ./stream_wordcount /mnt/shm
 # 机器学习？
 
 #负载均衡
-mpirun --bind-to none -n 2 -host ${HOSTS} ./graph_preprocess ${INPUT_GRAPH_PATH} ${UNBALANCED_GRAPH_PATH} equal_vertex
-mpirun --bind-to none -n 2 -host ${HOSTS} ./graph_preprocess ${INPUT_GRAPH_PATH} ${OUTPUT_GRAPH_PATH} chunkroundrobin
+
+# 2 Process
+mpirun --bind-to socket -npernode 1 --hostfile hostfile.txt -- ./graph_preprocess ${INPUT_GRAPH_PATH} ${UNBALANCED_GRAPH_PATH} equal_vertex
+mpirun --bind-to socket -npernode 1 --hostfile hostfile.txt -- ./graph_preprocess ${INPUT_GRAPH_PATH} ${OUTPUT_GRAPH_PATH} chunkroundrobin
+
+mpirun --bind-to socket -npernode 1 --hostfile hostfile.txt -- ./graph_preprocess ${INPUT_GRAPH_PATH} ${OUTPUT_GRAPH_PATH} chunkroundrobin
+mpirun --bind-to socket -npersocket 1 --hostfile hostfile.txt -- ./graph_preprocess ${INPUT_GRAPH_PATH} ${OUTPUT_GRAPH_PATH} chunkroundrobin

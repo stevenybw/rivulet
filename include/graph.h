@@ -17,8 +17,6 @@ const double alpha = 0.15;
 // int g_group_size = 4;
 // int g_num_sockets = 4;
 int g_group_size = 1;
-int g_rank = 0;
-int g_nprocs = 1;
 
 // define converge criterion
 // const double epsilon = 0.001;

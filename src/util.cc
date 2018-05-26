@@ -16,8 +16,8 @@ int nodes[128*1024];
 int statuses[128*1024];
 
 uint64_t g_begin_ts;
-int g_rank = 0;
-int g_nprocs = 1;
+int g_rank = -1;
+int g_nprocs = -1;
 
 #ifdef MPI_DEBUG
 

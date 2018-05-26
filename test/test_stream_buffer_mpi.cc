@@ -37,14 +37,14 @@ public:
     assert(!occupied[buffer_id]);
     int bytes_as_i32 = bytes;
     PRINTF("%d> send to rank %d for %zu bytes\n", rank, target_rank, bytes);
-    MPI_Isend(buffer, bytes_as_i32, MPI_CHAR, target_rank, TAG_DATA, comm, &reqs[buffer_id]);
+    // MPI_Isend(buffer, bytes_as_i32, MPI_CHAR, target_rank, TAG_DATA, comm, &reqs[buffer_id]);
     occupied[buffer_id] = true;
   }
 
   void on_wait(int buffer_id) override {
     PRINTF("%d> on_wait  id=%d/%d\n", rank, target_rank, buffer_id);
     assert(occupied[buffer_id]);
-    MPI_Wait(&reqs[buffer_id], MPI_STATUS_IGNORE);
+    // MPI_Wait(&reqs[buffer_id], MPI_STATUS_IGNORE);
     occupied[buffer_id] = false;
   }
 

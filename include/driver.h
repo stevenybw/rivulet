@@ -186,31 +186,65 @@ struct ObjectRequirement
   }
 };
 
+template < typename T, typename Compare >
+void parallel_sort(size_t num_elements, T* data, Compare comp) {
+  int layer = 6;  // 64 leaves
+  parallel_sort_internal(num_elements, data, comp, layer);
+}
+
+void parallel_memcpy(void* dst, const void* src, size_t bytes) {
+  char* dst_p = (char*) dst;
+  const char* src_p = (char*) src;
+  #pragma omp parallel
+  {
+    int tid = omp_get_thread_num();
+    int nthreads = omp_get_num_threads();
+    size_t chunk_size = bytes / nthreads / 16 * 16;
+    size_t from = tid * chunk_size;
+    size_t to = (tid == (nthreads-1))?bytes:(tid+1)*chunk_size;
+    memcpy(&dst_p[from], &src_p[from], to-from);
+  }
+}
+
+template < typename T, typename Compare >
+void parallel_sort_internal(size_t num_elements, T* data, Compare comp, int layer) {
+  printf("parallel_sort_internal layer = %d\n", layer);
+  if (num_elements <= 1) {
+    return;
+  }
+  if (layer == 0) { // sequential
+    std::sort(&data[0], &data[num_elements], comp);
+    return;
+  }
+  size_t num_left = 0;
+  T pivot = data[num_elements/2];
+  for(size_t i=0; i<num_elements; i++) {
+    if (comp(data[i], pivot)) {
+      swap(data[num_left], data[i]);
+      num_left++;
+    }
+  }
+  #pragma omp parallel sections
+  {
+    #pragma omp section
+    { parallel_sort_internal(num_left, data, comp, layer-1); }
+
+    #pragma omp section
+    { parallel_sort_internal(num_elements - num_left, &data[num_left], comp, layer-1); }
+  }
+}
+
 template< class RandomIt, class Compare >
 void my_sort( RandomIt first, RandomIt last, Compare comp ) {
   uint64_t duration = -currentTimeUs();
-  /*
-  #pragma omp parallel
-  {
-    int thread_id   = omp_get_thread_num();
-    int num_threads = omp_get_num_threads();
-    size_t nel = last - first;
-    size_t nel_chunk = nel / num_threads;
-    RandomIt begin_it = first + (thread_id * nel_chunk);
-    RandomIt end_it = first + ((thread_id == num_threads-1)?nel:(thread_id+1)*nel_chunk);
-    sort(begin_it, end_it, comp);
-  }
-  duration += currentTimeUs();
-  printf("  parallel pre-sort time = %lf sec\n", 1e-6 * duration);
-  */
   int rank;
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
   duration = -currentTimeUs();
-  // TODO __gnu_parallel::sort leads to segfault in MPI_Finalize()
-  //__gnu_parallel::sort(first, last, comp);
-  sort(first, last, comp);
+  // sort(first, last, comp);
+  size_t num_elements = last - first;
+  parallel_sort(num_elements, first, comp);
   duration += currentTimeUs();
-  printf("  %d> serial global sort time = %lf sec\n", rank, 1e-6 * duration);
+  printf("  %d> parallel global sort time = %lf sec\n", rank, 1e-6 * duration);
 }
 
 
@@ -394,16 +428,15 @@ struct Driver
     GArray<T>* med = create_array<T>(ObjectRequirement::create_transient(Object::MEMORY), num_local_elements);
     T* med_data_begin = med->data();
     LOG_BEGIN();
-    LOG_INFO("Copy the array to be sorted");
-    memcpy(med_data_begin, in_data_begin, num_local_elements * sizeof(T));
-
+    LOG_INFO("Copy data");
+    parallel_memcpy(med_data_begin, in_data_begin, num_local_elements * sizeof(T));
     LOG_INFO("Qsort for Ordering Tuples by Rank");
     my_sort(med_data_begin, med_data_begin+num_local_elements, [&part_fn](const T& lhs, const T& rhs) {
       int lhs_part = part_fn(lhs);
       int rhs_part = part_fn(rhs);
       return lhs_part < rhs_part;
     });
-    
+    LOG_INFO("Calculate displacement");
     // check for order
     for(size_t i=0; i<num_local_elements-1; i++) {
       assert(part_fn(med_data_begin[i]) < nprocs);
@@ -440,7 +473,7 @@ struct Driver
     MPI_Datatype datatype;
     MPI_Type_contiguous(sizeof(T), MPI_CHAR, &datatype);
     MPI_Type_commit(&datatype);
-    LOG_INFO("Alltoallv for Output\n");
+    LOG_INFO("AlltoallvL\n");
     YMPI_AlltoallvL(med_data_begin, scounts, sdispls, datatype, out_data_begin, rcounts, rdispls, datatype, comm);
     // post check
     {

@@ -29,24 +29,7 @@ thread_local int tl_stage_id = -1;
 thread_local int tl_task_id = -1;
 thread_local int tl_transform_id = -1;
 
-// int g_rank;
-// int g_nprocs;
-
-uint64_t g_begin_ts;
 std::mutex g_mpi_lock; // protects mpi routine
-
-uint64_t currentAbsoluteTimestamp() {
-  unsigned hi, lo;
-  asm volatile ("CPUID\n\t"
-      "RDTSC\n\t"
-      "mov %%edx, %0\n\t"
-      "mov %%eax, %1\n\t": "=r" (hi), "=r" (lo) : : "%rax", "%rbx", "%rcx", "%rdx");
-  return ((uint64_t) hi << 32) | lo;
-}
-
-uint64_t currentTimestamp() {
-  return currentAbsoluteTimestamp() - g_begin_ts;
-}
 
 // Raised if the channel being closed while pulling
 struct ChannelClosedException : public std::exception {
@@ -457,22 +440,6 @@ struct ChannelMgr
     }
   }
 };
-
-void RV_Init()
-{
-  int required_level = MPI_THREAD_SERIALIZED;
-  int provided_level;
-  MPI_Init_thread(NULL, NULL, required_level, &provided_level);
-  assert(provided_level >= required_level);
-  MPI_Comm_rank(MPI_COMM_WORLD, &g_rank);
-  MPI_Comm_size(MPI_COMM_WORLD, &g_nprocs);
-  g_begin_ts = currentAbsoluteTimestamp();
-}
-
-void RV_Finalize()
-{
-  MPI_Finalize();
-}
 
 // using ChannelList = std::vector<Channel*>;
 

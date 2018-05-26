@@ -26,28 +26,50 @@
 
 using namespace std;
 
-const size_t partition_id_bits = 1;
-
 // struct PageRankPushUpdater {
-//   double* curr_val;
-//   double* next_val;
-//   double vertex_value(VertexId u) override { return curr_val[u]; }
-//   void process_update(VertexId v, double contrib) { next_val[u] += contrib; }
-// };
-// 
-// struct PageRankPullUpdater {
 //   double* curr_val;
 //   double* next_val;
 //   double vertex_value(VertexId u) override { return curr_val[u]; }
 //   void process_update(VertexId v, double contrib) { Atomic<double>::cas_atomic_update(&next_val[v], contrib); }
 // };
 
+template <typename VertexId>
+struct PageRankProgram : public GraphProgram<VertexId, double> {
+  double* current_val;
+  double* next_val;
+
+  PageRankProgram(double* current_val, double* next_val) : current_val(current_val), next_val(next_val) {}
+
+  // get local accumulation from mirror v, given edges it
+  void dense_signal(VertexId v, InEdgesIterator it) override {
+    double sum = 0.0;
+    for(InEdge edge : it) {
+      VertexId src = edge.neighbor();
+      sum += curr_val[src];
+    }
+    this->emit(v, sum);
+  }
+
+  // master v receives a message msg
+  VertexId dense_slot(VertexId v, double msg) override {
+    Atomic<double>::cas_atomic_update(&next_val[v], contrib);
+    return 1;
+  }
+};
+ 
+struct PageRankPullUpdater {
+  double* curr_val;
+  double* next_val;
+  VertexSubset active_verteces();
+  double vertex_value(VertexId u) override { return curr_val[u]; }
+};
+
+const char* run_mode_push = "push";
+const char* run_mode_pull = "pull";
+
 int main(int argc, char* argv[]) {
   uint64_t duration;
-  int required_level = MPI_THREAD_SERIALIZED;
-  int provided_level;
-  MPI_Init_thread(NULL, NULL, required_level, &provided_level);
-  assert(provided_level >= required_level);
+  RV_Init();
   init_debug();
   int rank, nprocs;
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
@@ -56,13 +78,11 @@ int main(int argc, char* argv[]) {
   g_rank = rank;
   g_nprocs = nprocs;
 
-  if (argc < 4) {
-    cerr << "Usage: " << argv[0] << " <graph_path> <num_iters> <chunk_size>" << endl;
-    return -1;
-  }
-  string graph_path = argv[1];
-  int num_iters = atoi(argv[2]);
-  uint32_t chunk_size = atoi(argv[3]);
+  CommandLine cmdline(argc, argv, 4, {"graph_path", "num_iters", "chunk_size", "run_mode"}, {nullptr, nullptr, "512", "push"})
+  string graph_path   = cmdline.getValue(0);
+  int num_iters       = atoi(cmdline.getValue(1));
+  uint32_t chunk_size = atoi(cmdline.getValue(2));
+  string run_mode     = cmdline.getValue(3);
 
   if (rank == 0) {
     cout << "  graph_path = " << graph_path << endl;
@@ -113,12 +133,17 @@ int main(int argc, char* argv[]) {
       src[i] = alpha * next_val[i] / (double)(graph.get_index_from_lid(i+1) - graph.get_index_from_lid(i));
       next_val[i] = 1.0 - alpha;
     }
-    // graph_context.edge_map(graph, src, next_val, chunk_size, [](double* next_val, double contrib){*next_val += contrib;});
-    VertexRange<uint32_t> all_vertex(0, num_nodes);
-    auto vertex_value_op = [src](uint32_t u){return src[u];};
-    auto on_update_op = [next_val](uint32_t v, double value) { next_val[v] += value; };
-    auto on_update_gen = [&on_update_op]() {return on_update_op;};
-    graph_context.compute_push_delegate<double, decltype(on_update_op)>(graph, all_vertex.begin(), all_vertex.end(), vertex_value_op, on_update_gen, chunk_size);
+
+    if (run_mode == run_mode_push) {
+      // graph_context.edge_map(graph, src, next_val, chunk_size, [](double* next_val, double contrib){*next_val += contrib;});
+      VertexRange<uint32_t> all_vertex(0, num_nodes);
+      auto vertex_value_op = [src](uint32_t u){return src[u];};
+      auto on_update_op = [next_val](uint32_t v, double value) { next_val[v] += value; };
+      auto on_update_gen = [&on_update_op]() {return on_update_op;};
+      graph_context.compute_push_delegate<double, decltype(on_update_op)>(graph, all_vertex.begin(), all_vertex.end(), vertex_value_op, on_update_gen, chunk_size);
+    } else if (run_mode == run_mode_pull) {
+      graph_context.compute_pull<PageRankProgram>();
+    }
 
     MPI_Barrier(MPI_COMM_WORLD);
     duration += currentTimeUs();
@@ -140,6 +165,6 @@ int main(int argc, char* argv[]) {
     cout << "average duration = " << (sum_duration / num_iters) << endl;
   }
 
-  MPI_Finalize();
+  RV_Finalize();
   return 0;
 }
