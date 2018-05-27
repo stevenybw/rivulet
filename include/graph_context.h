@@ -32,7 +32,7 @@ struct Memcpy<GeneralUpdateRequest<uint32_t, double>>
     _mm_stream_pd((double*)destptr, *((__m128d*)rhs));
   }
 
-  static void StreamingStore(void* destptr, const GeneralUpdateRequest<uint32_t, double>* rhsptr, int num_element) {
+  static void StreamingStoreUnrolled(void* destptr, const GeneralUpdateRequest<uint32_t, double>* rhsptr, int num_element) {
     //assert(sizeof(GeneralUpdateRequest<uint32_t, double>) == 16);
     __m128d* dest = (__m128d*) destptr;
     __m128d* rhs  = (__m128d*) rhsptr;
@@ -43,6 +43,25 @@ struct Memcpy<GeneralUpdateRequest<uint32_t, double>>
       _mm_stream_pd((double*)&dest[i+3], rhs[i+3]);
     }
   }
+
+  static void StreamingStore(void* destptr, const GeneralUpdateRequest<uint32_t, double>* rhsptr, int num_element) {
+    //assert(sizeof(GeneralUpdateRequest<uint32_t, double>) == 16);
+    __m128d* dest = (__m128d*) destptr;
+    __m128d* rhs  = (__m128d*) rhsptr;
+    for (int i=0; i<num_element; i++) {
+      _mm_stream_pd((double*)&dest[i], rhs[i]);
+    }
+  }
+
+
+//  For debug purpose
+//  static void StreamingStoreUnrolled(void* destptr, const GeneralUpdateRequest<uint32_t, double>* rhsptr, int num_element) {
+//    memcpy(destptr, rhsptr, num_element * sizeof(GeneralUpdateRequest<uint32_t, double>));
+//  }
+//
+//  static void StreamingStore(void* destptr, const GeneralUpdateRequest<uint32_t, double>* rhsptr, int num_element) {
+//    memcpy(destptr, rhsptr, num_element * sizeof(GeneralUpdateRequest<uint32_t, double>));
+//  }
 
   static void PrefetchNTA(const GeneralUpdateRequest<uint32_t, double>* destptr) {
     _mm_prefetch(&destptr[0], _MM_HINT_T0);
@@ -791,7 +810,7 @@ struct GraphContext {
               for (size_t offset=0; offset<bytes; offset+=sizeof(UpdateRequest)) {
                 uint64_t y = req_ptr->y;
                 int next_val_rank = graph.get_rank_from_vid(y);
-                {
+                { // append new entry to next_val_rank
                   size_t curr_bytes = curr_bytes_list[next_val_rank];
                   // check to see if a write-back (and corresponding issue) is required
                   if (curr_bytes > 0 && curr_bytes % COMBINE_BUFFER_SIZE == 0) {
@@ -799,7 +818,7 @@ struct GraphContext {
                     size_t write_back_pos = curr_bytes - COMBINE_BUFFER_SIZE;
                     // first write back into memory buffer
                     int    buf_id = buf_id_list[next_val_rank];
-                    Memcpy<UpdateRequest>::StreamingStore(&sendbuf[next_val_rank][buf_id][write_back_pos], (UpdateRequest*) combinebuf , COMBINE_BUFFER_SIZE/sizeof(UpdateRequest));
+                    Memcpy<UpdateRequest>::StreamingStoreUnrolled(&sendbuf[next_val_rank][buf_id][write_back_pos], (UpdateRequest*) &combinebuf[next_val_rank][0] , COMBINE_BUFFER_SIZE/sizeof(UpdateRequest));
                     // then send out if required
                     if (curr_bytes == MPI_SEND_BUFFER_SIZE) {
                       // LINES;
@@ -840,6 +859,15 @@ struct GraphContext {
           if (next_val_rank != rank) {
             int    buf_id = buf_id_list[next_val_rank];
             size_t curr_bytes = curr_bytes_list[next_val_rank];
+            { // write back
+              size_t combine_buffer_bytes = curr_bytes%COMBINE_BUFFER_SIZE;
+              if (combine_buffer_bytes==0 && curr_bytes!=0) {
+                combine_buffer_bytes = COMBINE_BUFFER_SIZE;
+              }
+              assert(combine_buffer_bytes % sizeof(UpdateRequest) == 0);
+              Memcpy<UpdateRequest>::StreamingStore(&sendbuf[next_val_rank][buf_id][curr_bytes - combine_buffer_bytes], (UpdateRequest*) &combinebuf[next_val_rank][0], combine_buffer_bytes/sizeof(UpdateRequest));
+            }
+            
             int flag = 0;
             while (!flag) {
               MT_MPI_Test(&req[next_val_rank][buf_id], &flag, MPI_STATUS_IGNORE);
@@ -894,15 +922,15 @@ struct GraphContext {
             int rbytes = 0;
             MT_MPI_Get_count(&st, MPI_CHAR, &rbytes);
             if (tag == TAG_DATA) {
-              // UpdateRequest* rbuf = (UpdateRequest*) recvbuf[buf_id];
-              // assert(rbytes % sizeof(UpdateRequest) == 0);
-              // int rcount = rbytes / sizeof(UpdateRequest);
-              // for(int i=0; i<rcount; i++) {
-              //   uint32_t llid = rbuf[i].y;
-              //   int target_tid = approx_mod.approx_mod(llid >> UPDATER_BLOCK_SIZE_PO2);
-              //   size_t next_bytes = from_imports[tid][target_tid].push_explicit(rbuf[i], counter[target_tid]);
-              //   counter[target_tid] = next_bytes;
-              // }
+              UpdateRequest* rbuf = (UpdateRequest*) recvbuf[buf_id];
+              assert(rbytes % sizeof(UpdateRequest) == 0);
+              int rcount = rbytes / sizeof(UpdateRequest);
+              for(int i=0; i<rcount; i++) {
+                uint32_t llid = rbuf[i].y;
+                int target_tid = approx_mod.approx_mod(llid >> UPDATER_BLOCK_SIZE_PO2);
+                size_t next_bytes = from_imports[tid][target_tid].push_explicit(rbuf[i], counter[target_tid]);
+                counter[target_tid] = next_bytes;
+              }
             } else if (tag == TAG_CLOSE) {
               assert(rbytes == 0);
               __sync_fetch_and_add(importer_num_close_request, 1);
