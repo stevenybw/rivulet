@@ -84,6 +84,7 @@ mpirun --bind-to none -n 2 -host phoenix00,phoenix01 ./stream_wordcount /mnt/shm
 # 2 Process
 mpirun --bind-to socket -npernode 1 --hostfile hostfile.txt -- ./graph_preprocess ${INPUT_GRAPH_PATH} ${UNBALANCED_GRAPH_PATH} equal_vertex
 mpirun --bind-to socket -npernode 1 --hostfile hostfile.txt -- ./graph_preprocess ${INPUT_GRAPH_PATH} ${OUTPUT_GRAPH_PATH} chunkroundrobin
+mpirun --bind-to socket -npernode 1 --hostfile hostfile.txt -- ./graph_preprocess ${INPUT_GRAPH_PATH} ${OUTPUT_GRAPH_PATH}_chunk256k chunkroundrobin
 
 mpirun --bind-to socket -npernode 1 --hostfile hostfile.txt -- ./graph_preprocess ${INPUT_GRAPH_PATH} ${OUTPUT_GRAPH_PATH} chunkroundrobin
 mpirun --bind-to socket -npersocket 1 --hostfile hostfile.txt -- ./graph_preprocess ${INPUT_GRAPH_PATH} ${OUTPUT_GRAPH_PATH} chunkroundrobin

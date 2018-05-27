@@ -10,6 +10,8 @@
 
 using namespace std;
 
+#define VALIDATE_REPARTITION 1
+
 // const size_t remap_chunk_size_po2 = 6; // 64
 // const size_t remap_chunk_size     = (1LL << remap_chunk_size_po2);
 size_t remap_chunk_size = 0;
@@ -130,11 +132,31 @@ int main(int argc, char* argv[])
   delete graph_tuples; graph_tuples=NULL;
 
   LOG_INFO("Repart Tuples");
+
+#if VALIDATE_REPARTITION
+  size_t global_size_before = graph_tuples_remapped->global_size();
+  uint64_t global_checksum_before = graph_tuples_remapped->global_checksum();
+#endif
+
   GArray<pair<uint32_t, uint32_t>>* graph_tuples_reparted = driver->repartition(graph_tuples_remapped, [](pair<uint32_t, uint32_t> edge) {
     uint32_t x = edge.first;
     int part_id = ComposedNodeId(x).partition_id();
     return part_id;
   }, ObjectRequirement::create_transient(Object::NVM_ON_CACHE));
+
+#if VALIDATE_REPARTITION
+  size_t global_size_after = graph_tuples_reparted->global_size();
+  uint64_t global_checksum_after = graph_tuples_reparted->global_checksum();
+  if (rank == 0) {
+    printf("======== VALIDATE_REPARTITION ==========\n");
+    printf("  global_size_before = %zu\n", global_size_before);
+    printf("  global_size_after  = %zu\n", global_size_after);
+    printf("  global_checksum_before = 0x%lX\n", global_checksum_before);
+    printf("  global_checksum_after  = 0x%lX\n", global_checksum_after);
+    printf("  they are %s\n", (global_size_before==global_size_after && global_checksum_before==global_checksum_after)?"equal":"different");
+  }
+#endif
+
   delete graph_tuples_remapped; graph_tuples_remapped=NULL;
   LOG_INFO("Local Sort The Tuples");
   {
@@ -164,8 +186,12 @@ int main(int argc, char* argv[])
     ObjectRequirement::create_persist(output_graph_path+".index"));
   
   delete graph_tuples_reparted; graph_tuples_reparted=NULL;
-  delete get<0>(csr_result);
-  delete get<1>(csr_result);
+  GArray<uint32_t>* csr_edges = get<0>(csr_result);
+  GArray<uint64_t>* csr_index = get<1>(csr_result);
+  assert(csr_edges->global_size() == total_num_edges);
+  assert(csr_index->global_size() == total_num_nodes + nprocs);
+  delete csr_edges;
+  delete csr_index;
 
   MPI_Finalize();
   return 0;

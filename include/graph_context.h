@@ -930,6 +930,7 @@ struct GraphContext {
                 int target_tid = approx_mod.approx_mod(llid >> UPDATER_BLOCK_SIZE_PO2);
                 size_t next_bytes = from_imports[tid][target_tid].push_explicit(rbuf[i], counter[target_tid]);
                 counter[target_tid] = next_bytes;
+                // _mm_prefetch(rbuf+1, _MM_HINT_NTA);
               }
             } else if (tag == TAG_CLOSE) {
               assert(rbytes == 0);
@@ -963,6 +964,8 @@ struct GraphContext {
     }
 
     uint64_t edges_processed_per_thread[num_client_threads];
+    uint64_t client_us_per_thread[num_client_threads];
+
     uint64_t frontier_num_nodes = frontier_end - frontier_begin;
     uint32_t num_chunks         = (frontier_num_nodes + chunk_size - 1)/chunk_size;
     // uint64_t num_local_nodes = graph.local_num_nodes();
@@ -983,6 +986,9 @@ struct GraphContext {
       int socket_id = socket_list[tid/num_client_threads_per_socket];
       int ok  = rivulet_numa_socket_bind(socket_id);
       assert(ok == 0);
+
+      uint64_t duration = -currentTimeUs();
+
       while (true) {
         uint32_t chunk_id = __sync_fetch_and_add(current_chunk_id, 1);
         if (chunk_id >= num_chunks) {
@@ -1033,8 +1039,12 @@ struct GraphContext {
         to_exports[tid][export_id].flush_and_wait_explicit(curr_bytes);
         export_counter[export_id] = 0;
       }
+      
+      duration += currentTimeUs();
+
       __sync_fetch_and_add(num_client_done, 1);
       edges_processed_per_thread[tid] = edges_processed;
+      client_us_per_thread[tid] = duration;
     }
 
     for(int i=0; i<num_updater_threads; i++) {
@@ -1058,6 +1068,17 @@ struct GraphContext {
     uint64_t global_max_ur = 0;
     process_sum(MPI_COMM_WORLD, requests_processed_per_updater, num_updater_threads, global_min_ur, global_avg_ur, global_max_ur);
 
+    uint64_t total_client_edges = 0;
+    double   client_bw_sum = 0;
+    for(int id=0; id<num_client_threads; id++) {
+      total_client_edges += edges_processed_per_thread[id];
+      client_bw_sum += 1.0*edges_processed_per_thread[id]*sizeof(UpdateRequest)/client_us_per_thread[id];
+    }
+    uint64_t total_client_edges_all[nprocs];
+    double client_bw_sum_all[nprocs];
+    MPI_Allgather(&total_client_edges, 1, MPI_UNSIGNED_LONG_LONG, total_client_edges_all, 1, MPI_UNSIGNED_LONG_LONG, MPI_COMM_WORLD);
+    MPI_Allgather(&client_bw_sum, 1, MPI_DOUBLE, client_bw_sum_all, 1, MPI_DOUBLE, MPI_COMM_WORLD);
+
     uint64_t total_processed = 0;
     double   bw_sum = 0.0;
 
@@ -1066,13 +1087,15 @@ struct GraphContext {
       total_processed += total_bytes_per_updater[id];
       bw_sum += 1.0*total_bytes_per_updater[id]/total_us_per_updater[id];
     }
-
     uint64_t total_processed_all[nprocs];
     double bw_sum_all[nprocs];
     MPI_Allgather(&total_processed, 1, TypeTrait<uint64_t>::getMPIType(), total_processed_all, 1, TypeTrait<uint64_t>::getMPIType(), MPI_COMM_WORLD);
     MPI_Allgather(&bw_sum, 1, TypeTrait<double>::getMPIType(), bw_sum_all, 1, TypeTrait<double>::getMPIType(), MPI_COMM_WORLD);
 
     if (rank == 0) {
+      for(int i=0; i<nprocs; i++) {
+        printf("[Generator Threads %d]  total_processed %0.2lf MB     bw %0.2lf MB/s\n", i, 1e-6*total_client_edges_all[i]*sizeof(UpdateRequest), client_bw_sum_all[i]);
+      }
       for(int i=0; i<nprocs; i++) {
         printf("[Updater Threads %d]    total_processed %0.2lf MB     bw %0.2lf MB/s\n", i, 1e-6*total_processed_all[i], bw_sum_all[i]);
       }

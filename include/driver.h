@@ -208,7 +208,7 @@ void parallel_memcpy(void* dst, const void* src, size_t bytes) {
 
 template < typename T, typename Compare >
 void parallel_sort_internal(size_t num_elements, T* data, Compare comp, int layer) {
-  printf("parallel_sort_internal layer = %d\n", layer);
+  // printf("parallel_sort_internal layer = %d\n", layer);
   if (num_elements <= 1) {
     return;
   }
@@ -421,6 +421,10 @@ struct Driver
    */
   template <typename T, typename PartitionFnType>
   GArray<T>* repartition(GArray<T>* input, const PartitionFnType& part_fn, ObjectRequirement obj_req) {
+    {
+      uint64_t sum = input->global_checksum();
+      printf("  %d  checksum = %lx\n", __LINE__, sum);
+    }
     assert(obj_req.is_type_create());
     uint64_t duration;
     T* in_data_begin = input->data();
@@ -430,12 +434,20 @@ struct Driver
     LOG_BEGIN();
     LOG_INFO("Copy data");
     parallel_memcpy(med_data_begin, in_data_begin, num_local_elements * sizeof(T));
+    {
+      uint64_t sum = med->global_checksum();
+      printf("  %d  checksum = %lx\n", __LINE__, sum);
+    }
     LOG_INFO("Qsort for Ordering Tuples by Rank");
     my_sort(med_data_begin, med_data_begin+num_local_elements, [&part_fn](const T& lhs, const T& rhs) {
       int lhs_part = part_fn(lhs);
       int rhs_part = part_fn(rhs);
       return lhs_part < rhs_part;
     });
+    {
+      uint64_t sum = med->global_checksum();
+      printf("  %d  checksum = %lx\n", __LINE__, sum);
+    }
     LOG_INFO("Calculate displacement");
     // check for order
     for(size_t i=0; i<num_local_elements-1; i++) {
@@ -489,6 +501,10 @@ struct Driver
     }
     delete med;
     LOG_INFO("Repartition Done");
+    {
+      uint64_t sum = output->global_checksum();
+      printf("  %d  checksum = %lx\n", __LINE__, sum);
+    }
     return output;
   }
 
@@ -546,12 +562,27 @@ struct Driver
     
     GArray<NodeT>* garr_edges = create_array<NodeT>(edges_obj_req, num_edges);
     NodeT* edges = garr_edges->data();
-    // verify the order of input tuples
-    #pragma omp parallel for
-    for(uint64_t i=0; i<num_edges; i++) {
+    // verify the order of input tuples, and get max local master vid.
+    uint64_t max_local_master_vid = 0;
+    #pragma omp parallel for reduction(max: max_local_master_vid)
+    for (uint64_t i=0; i<num_edges; i++) {
       NodeT x = tuples[i].first;
       NodeT y = tuples[i].second;
-      assert(part_fn(x) == rank);
+      {
+        assert(part_fn(x) == rank);
+        uint64_t vid = offset_fn(x);
+        if (vid > max_local_master_vid) {
+          max_local_master_vid = vid;
+        }
+      }
+      {
+        if (part_fn(y) == rank) {
+          uint64_t vid = offset_fn(y);
+          if (vid > max_local_master_vid) {
+            max_local_master_vid = vid;
+          }
+        }
+      }
       if (i != 0) {
         if (tuples[i-1].first == tuples[i].first) {
           assert(tuples[i-1].second <= tuples[i].second);
@@ -562,7 +593,7 @@ struct Driver
       edges[i] = y;
     }
     // largest node id in this partition
-    uint64_t largest_offset = std::max(offset_fn(tuples[num_edges-1].first), offset_fn(tuples[num_edges-1].second));
+    uint64_t largest_offset = max_local_master_vid;
     uint64_t num_nodes = largest_offset + 1;
     GArray<IndexT>* garr_index = create_array<IndexT>(index_obj_req, num_nodes+1);
     IndexT* index = garr_index->data();

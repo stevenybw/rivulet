@@ -28,7 +28,28 @@ struct GArray
     delete _obj;
   }
   T& operator[](size_t idx) { return _data[idx]; }
+  
   size_t size() { return _size; }
+
+  size_t global_size() {
+    size_t global_size;
+    MPI_Allreduce(&_size, &global_size, 1, MPI_UNSIGNED_LONG_LONG, MPI_SUM, _obj->communicator());
+    return global_size;
+  }
+
+  uint64_t global_checksum() {
+    assert(sizeof(T) % sizeof(uint64_t) == 0);
+    uint64_t local_checksum = 0;
+    uint64_t* ptr = (uint64_t*) _data;
+    uint64_t  num_elem = _size;
+    for (size_t i=0; i<num_elem; i++) {
+      local_checksum ^= ptr[i];
+    }
+    uint64_t global_checksum = 0;
+    MPI_Allreduce(&local_checksum, &global_checksum, 1, MPI_UNSIGNED_LONG_LONG, MPI_BXOR, _obj->communicator());
+    return global_checksum;
+  }
+
   void resize(size_t size) {
     assert(size * sizeof(T) <= _obj->local_capacity());
     _size = size;
