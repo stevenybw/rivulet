@@ -17,6 +17,7 @@ using namespace std;
 
 class FileSystemWatch
 {
+  const char* LOCK_POSTFIX = ".completed.lock";
   std::mutex mu;
   int watch_fd;
   std::vector<string> paths;
@@ -50,6 +51,17 @@ public:
     wds.push_back(wd);
   }
 
+  bool lock_file(string path) {
+    string lock_path = path + LOCK_POSTFIX;
+    int fd = open(lock_path.c_str(), O_WRONLY | O_CREAT | O_EXCL, S_IRWXU|S_IRWXG);
+    if (fd < 0) {
+      return false;
+    } else {
+      close(fd);
+      return true;
+    }
+  }
+
   string next_entry() {
     std::lock_guard<std::mutex> lk(mu);
     /* Some systems cannot read integer variables if they are not
@@ -65,6 +77,9 @@ public:
       if (pending.size() > 0) {
         string path = pending.front();
         pending.pop();
+        if (!lock_file(path)) {
+          continue;
+        }
         return path;
       }
       ssize_t len = read(watch_fd, buf, sizeof buf);
@@ -93,22 +108,24 @@ public:
             }
             string path = prefix + name;
             if (event->mask & IN_CREATE) {
-              printf("CREATE %s\n", path.c_str());
+              // printf("CREATE %s\n", path.c_str());
               file_list[path] = FILE_CREATED;
             }
             if (event->mask & IN_OPEN) {
-              printf("OPEN %s\n", path.c_str());
+              // printf("OPEN %s\n", path.c_str());
               if (file_list.find(path) != file_list.end()) {
                 // assert(file_list[path] == FILE_CREATED);
                 file_list[path] = FILE_OPENED;
               }
             }
             if (event->mask & IN_CLOSE_WRITE) {
-              printf("CLOSE_WRITE %s\n", path.c_str());
+              // printf("CLOSE_WRITE %s\n", path.c_str());
               if (file_list.find(path) != file_list.end()) {
                 assert(file_list[path] == FILE_OPENED);
                 file_list.erase(path);
-                pending.push(path);
+                if (path.find(LOCK_POSTFIX) == string::npos) {
+                  pending.push(path);
+                }
               }
             }
           }

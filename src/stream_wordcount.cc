@@ -62,10 +62,11 @@ struct StringSplit : public DoFn<string, string>
     char buf[elem.size()+1];
     memcpy(buf, elem.c_str(), elem.size());
     buf[elem.size()] = '\0';
-    char* token = strtok(buf, delimer);
+    char* saved_ptr = NULL;
+    char* token = strtok_r(buf, delimer, &saved_ptr);
     while (token != NULL) {
       processContext.output(std::string(token));
-      token = strtok(NULL, delimer);
+      token = strtok_r(NULL, delimer, &saved_ptr);
     }
   }
 };

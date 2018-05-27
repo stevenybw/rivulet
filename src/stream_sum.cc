@@ -27,17 +27,6 @@ struct ParseDouble : public DoFn<string, double>
   }
 };
 
-struct ValueToString : public DoFn<WN<double>, string>
-{
-  void processElement(ProcessContext& processContext) override {
-    WN<double>& elem = processContext.element();
-    ostringstream oss;
-    oss << "wnid: " << elem.id << "   sum: " << elem.e;
-    string out_element = oss.str();
-    processContext.output(std::move(out_element));
-  }
-};
-
 struct DoubleToString : public DoFn<TS<double>, string>
 {
   void processElement(ProcessContext& processContext) override {
@@ -106,33 +95,49 @@ struct GenerateRandomDouble : public GenFn<double>
   }
 };
 
-template <typename T>
-struct SumFn : public CombineFn<T, T, T> {
-  T zero_value;
-  SumFn(T zero_value) : zero_value(zero_value) {}
-  T* createAccumulator() override {
-    return new T(zero_value);
+using SumCountPair = std::pair<double, uint64_t>;
+
+struct SumFn : public CombineFn<double, SumCountPair, SumCountPair> {
+  SumFn() {}
+  SumCountPair* createAccumulator() override {
+    SumCountPair* acc = new SumCountPair;
+    acc->first = 0.0;
+    acc->second = 0;
   }
-  void resetAccumulator(T* acc) {
-    (*acc) = zero_value;
+  void resetAccumulator(SumCountPair* acc) {
+    acc->first = 0.0;
+    acc->second = 0;
   }
-  void addInput(T* lhs, const T& rhs) override {
-    (*lhs) += rhs;
+  void addInput(SumCountPair* lhs, const double& rhs) override {
+    lhs->first += rhs;
+    lhs->second ++;
   }
-  T* mergeAccumulators(const std::list<T*>& accumulators) override {
-    T* result_acc = createAccumulator();
-    for(T* acc : accumulators) {
-      (*result_acc) += (*acc);
+  SumCountPair* mergeAccumulators(const std::list<SumCountPair*>& accumulators) override {
+    SumCountPair* result_acc = createAccumulator();
+    for(SumCountPair* acc : accumulators) {
+      result_acc->first += acc->first;
+      result_acc->second += acc->second;
     }
     return result_acc;
   }
-  T extractOutput(T* acc) {
+  SumCountPair extractOutput(SumCountPair* acc) {
     return *acc;
   }
 };
 
+struct ValueToString : public DoFn<WN<SumCountPair>, string>
+{
+  void processElement(ProcessContext& processContext) override {
+    WN<SumCountPair>& elem = processContext.element();
+    ostringstream oss;
+    oss << "wnid: " << elem.id << "   sum: " << elem.e.first << "  count: " << elem.e.second << "   average: " << (1.0*elem.e.first/elem.e.second);
+    string out_element = oss.str();
+    processContext.output(std::move(out_element));
+  }
+};
+
 int main(int argc, char* argv[]) {
-  assert(argc == 3);
+  assert(argc >= 3);
   RV_Init();
 
   init_debug();
@@ -144,7 +149,9 @@ int main(int argc, char* argv[]) {
   WithDevice(Device::CPU()->all_nodes()->all_sockets()->tasks_per_socket(2));
   PCollection<double>* parsed_array = NULL;
   if (text_path == "__random__") {
-    parsed_array = p->apply(Generator::of(GenerateRandomDouble(0.0, 1.0)));
+    assert(argc == 4);
+    double mu = atof(argv[3]);
+    parsed_array = p->apply(Generator::of(GenerateRandomDouble(0.0, 2.0 * mu)));
   } else {
     FileSystemWatch* fs_watch = new FileSystemWatch;
     fs_watch->add_watch(text_path);
@@ -157,7 +164,7 @@ int main(int argc, char* argv[]) {
 
   PCollection<WN<double>>* wn_parsed_array_shuffled = Shuffle::byWindowId(wn_parsed_array);
   WithDevice(Device::CPU()->all_nodes()->all_sockets()->tasks_per_socket(1));
-  PCollection<WN<double>>* wn_parsed_array_reduced = WindowedCombine::globally(wn_parsed_array_shuffled, SumFn<double>(0.0));
+  PCollection<WN<SumCountPair>>* wn_parsed_array_reduced = WindowedCombine::globally(wn_parsed_array_shuffled, SumFn());
   PCollection<string>* outputs = wn_parsed_array_reduced->apply(ParDo::of(ValueToString())->set_name("to string"));
   outputs->apply(TextIO::write()->to(output_path.c_str()));
   wn_parsed_array_shuffled->set_next_transform_eager();

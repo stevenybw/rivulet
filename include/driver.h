@@ -56,7 +56,7 @@ struct ExecutionContext {
   string nvm_oncache_staging_path;
 
   // Random State
-  random_device            _rand_dev;
+  // random_device            _rand_dev;
   default_random_engine    _rand_gen;
   uniform_int_distribution<uint64_t> _rand_dist;
 
@@ -69,8 +69,9 @@ struct ExecutionContext {
               dram_staging_path(dram_staging_path), 
               nvm_offcache_staging_path(nvm_offcache_staging_path), 
               nvm_oncache_staging_path(nvm_oncache_staging_path),
-              _rand_dev(),
-              _rand_gen(_rand_dev()),
+              // _rand_dev(),
+              // _rand_gen(_rand_dev()),
+              _rand_gen(),
               comm(comm) {
     MPI_Comm_rank(comm, &rank);
     MPI_Comm_size(comm, &nprocs);
@@ -186,12 +187,6 @@ struct ObjectRequirement
   }
 };
 
-template < typename T, typename Compare >
-void parallel_sort(size_t num_elements, T* data, Compare comp) {
-  int layer = 6;  // 64 leaves
-  parallel_sort_internal(num_elements, data, comp, layer);
-}
-
 void parallel_memcpy(void* dst, const void* src, size_t bytes) {
   char* dst_p = (char*) dst;
   const char* src_p = (char*) src;
@@ -207,8 +202,13 @@ void parallel_memcpy(void* dst, const void* src, size_t bytes) {
 }
 
 template < typename T, typename Compare >
+void parallel_sort(size_t num_elements, T* data, Compare comp) {
+  int layer = 4;  // 16 leaves
+  parallel_sort_internal(num_elements, data, comp, layer);
+}
+
+template < typename T, typename Compare >
 void parallel_sort_internal(size_t num_elements, T* data, Compare comp, int layer) {
-  // printf("parallel_sort_internal layer = %d\n", layer);
   if (num_elements <= 1) {
     return;
   }
@@ -224,14 +224,28 @@ void parallel_sort_internal(size_t num_elements, T* data, Compare comp, int laye
       num_left++;
     }
   }
-  #pragma omp parallel sections
-  {
-    #pragma omp section
-    { parallel_sort_internal(num_left, data, comp, layer-1); }
-
-    #pragma omp section
-    { parallel_sort_internal(num_elements - num_left, &data[num_left], comp, layer-1); }
+  size_t num_right = num_left;
+  for(size_t i=num_left; i<num_elements; i++) {
+    if (!comp(pivot, data[i])) {
+      swap(data[num_right], data[i]);
+      num_right++;
+    }
   }
+  // uint64_t next_seed_1 = seed * MMIX_CONSTANT_MULTIPLIER + MMIX_CONSTANT_INCREMENT;
+  // uint64_t next_seed_2 = seed * MMIX_CONSTANT_MULTIPLIER + MMIX_CONSTANT_INCREMENT + 1;
+  // printf("  layer = %d    left = %zu    right = %zu   pivot = %zu\n", layer, num_left, num_elements - num_left, seed % num_elements);
+  std::thread tleft([=](){ parallel_sort_internal(num_left, data, comp, layer-1); });
+  std::thread tright([=](){ parallel_sort_internal(num_elements - num_right, &data[num_right], comp, layer-1); });
+  tleft.join();
+  tright.join();
+  //  #pragma omp parallel sections
+  //  {
+  //    #pragma omp section
+  //    { parallel_sort_internal(num_left, data, comp, layer-1, next_seed_1); }
+  //
+  //    #pragma omp section
+  //    { parallel_sort_internal(num_elements - num_left, &data[num_left], comp, layer-1, next_seed_2); }
+  //  }
 }
 
 template< class RandomIt, class Compare >
@@ -244,7 +258,7 @@ void my_sort( RandomIt first, RandomIt last, Compare comp ) {
   size_t num_elements = last - first;
   parallel_sort(num_elements, first, comp);
   duration += currentTimeUs();
-  printf("  %d> parallel global sort time = %lf sec\n", rank, 1e-6 * duration);
+  PRINTF("  %d> parallel global sort time = %lf sec\n", rank, 1e-6 * duration);
 }
 
 
@@ -298,7 +312,7 @@ struct Driver
       }
       size_t local_capacity = obj_req.local_capacity();
       if (obj_req.is_transient() && obj_req.is_in_memory()) {
-        printf("%d> Create transient DRAM array (bytes = %zu)\n", rank, local_capacity);
+        PRINTF("%d> Create transient DRAM array (bytes = %zu)\n", rank, local_capacity);
         void* local_data = malloc(local_capacity);
         Object* obj = new Object([](){;}, [local_data](){free(local_data);}, [](void* ptr, size_t new_bytes){return realloc(ptr, new_bytes);});
         obj->_comm = ctx.get_comm();
@@ -332,10 +346,10 @@ struct Driver
       }
       Object* obj;
       if (is_persist) {
-        printf("%d> Create persist array (path = %s  bytes = %zu)\n", rank, file._path.c_str(), local_capacity);
+        PRINTF("%d> Create persist array (path = %s  bytes = %zu)\n", rank, file._path.c_str(), local_capacity);
         obj = new Object([file]() mutable {file.msync();}, [file]() mutable {file.close();}, [file](void* ptr, size_t new_bytes) mutable ->void* {return file.resize(new_bytes);});
       } else {
-        printf("%d> Create transient file (path = %s  bytes = %zu)\n", rank, file._path.c_str(), local_capacity);
+        PRINTF("%d> Create transient file (path = %s  bytes = %zu)\n", rank, file._path.c_str(), local_capacity);
         // for transient object, destruction implies an unlink
         obj = new Object([file]() mutable {file.msync();}, [file]() mutable {file.close();}, [file](void* ptr, size_t new_bytes) mutable  ->void* {return file.resize(new_bytes);});
       }
@@ -421,10 +435,6 @@ struct Driver
    */
   template <typename T, typename PartitionFnType>
   GArray<T>* repartition(GArray<T>* input, const PartitionFnType& part_fn, ObjectRequirement obj_req) {
-    {
-      uint64_t sum = input->global_checksum();
-      printf("  %d  checksum = %lx\n", __LINE__, sum);
-    }
     assert(obj_req.is_type_create());
     uint64_t duration;
     T* in_data_begin = input->data();
@@ -434,20 +444,12 @@ struct Driver
     LOG_BEGIN();
     LOG_INFO("Copy data");
     parallel_memcpy(med_data_begin, in_data_begin, num_local_elements * sizeof(T));
-    {
-      uint64_t sum = med->global_checksum();
-      printf("  %d  checksum = %lx\n", __LINE__, sum);
-    }
     LOG_INFO("Qsort for Ordering Tuples by Rank");
     my_sort(med_data_begin, med_data_begin+num_local_elements, [&part_fn](const T& lhs, const T& rhs) {
       int lhs_part = part_fn(lhs);
       int rhs_part = part_fn(rhs);
       return lhs_part < rhs_part;
     });
-    {
-      uint64_t sum = med->global_checksum();
-      printf("  %d  checksum = %lx\n", __LINE__, sum);
-    }
     LOG_INFO("Calculate displacement");
     // check for order
     for(size_t i=0; i<num_local_elements-1; i++) {
@@ -501,10 +503,6 @@ struct Driver
     }
     delete med;
     LOG_INFO("Repartition Done");
-    {
-      uint64_t sum = output->global_checksum();
-      printf("  %d  checksum = %lx\n", __LINE__, sum);
-    }
     return output;
   }
 

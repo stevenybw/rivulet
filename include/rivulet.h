@@ -658,7 +658,7 @@ struct DistributedPipelineScheduler {
       if (transform_instance_list.size() == 1) {
         worker_thread_list.push_back(std::move(Thread([this](){
           if (socket_id > 0) {
-            numa_run_on_node(socket_id);
+            rivulet_numa_socket_bind(socket_id);
           }
           PTInstance* instance = transform_instance_list[0];
           PTransform* ptransform = instance->ptransform;
@@ -673,7 +673,7 @@ struct DistributedPipelineScheduler {
             tl_transform_id = i;
             tl_task_id = id;
             if (socket_id > 0) {
-              numa_run_on_node(socket_id);
+              rivulet_numa_socket_bind(socket_id);
             }
             PTInstance* pti = transform_instance_list[i];
             PTransform* pt  = pti->ptransform;

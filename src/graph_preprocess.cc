@@ -147,14 +147,6 @@ int main(int argc, char* argv[])
 #if VALIDATE_REPARTITION
   size_t global_size_after = graph_tuples_reparted->global_size();
   uint64_t global_checksum_after = graph_tuples_reparted->global_checksum();
-  if (rank == 0) {
-    printf("======== VALIDATE_REPARTITION ==========\n");
-    printf("  global_size_before = %zu\n", global_size_before);
-    printf("  global_size_after  = %zu\n", global_size_after);
-    printf("  global_checksum_before = 0x%lX\n", global_checksum_before);
-    printf("  global_checksum_after  = 0x%lX\n", global_checksum_after);
-    printf("  they are %s\n", (global_size_before==global_size_after && global_checksum_before==global_checksum_after)?"equal":"different");
-  }
 #endif
 
   delete graph_tuples_remapped; graph_tuples_remapped=NULL;
@@ -189,7 +181,31 @@ int main(int argc, char* argv[])
   GArray<uint32_t>* csr_edges = get<0>(csr_result);
   GArray<uint64_t>* csr_index = get<1>(csr_result);
   assert(csr_edges->global_size() == total_num_edges);
-  assert(csr_index->global_size() == total_num_nodes + nprocs);
+  if (csr_index->global_size() != total_num_nodes + nprocs) {
+    printf("CAUTION: csr_index_global_size=%zu   total_num_nodes=%zu  nprocs=%d\n", csr_index->global_size(), total_num_nodes, nprocs);
+  }
+  size_t local_edges_bytes = csr_edges->size() * sizeof(uint32_t);
+  size_t local_index_bytes = csr_index->size() * sizeof(uint64_t);
+  printf("rank %d local edges file bytes = %zu\n", rank, local_edges_bytes);
+  printf("rank %d local index file bytes = %zu\n", rank, local_index_bytes);
+  size_t edges_bytes = csr_edges->global_size() * sizeof(uint32_t);
+  size_t index_bytes = csr_index->global_size() * sizeof(uint64_t);
+  if (rank == 0) {
+    printf("======== INFO ==========\n");
+    printf("  graph generated in path %s\n", output_graph_path.c_str());
+    printf("  total bytes for edges file = %zu\n", edges_bytes);
+    printf("  total bytes for index file = %zu\n", index_bytes);
+  }
+#if VALIDATE_REPARTITION
+  if (rank == 0) {
+    printf("======== VALIDATE_REPARTITION ==========\n");
+    printf("  global_size_before = %zu\n", global_size_before);
+    printf("  global_size_after  = %zu\n", global_size_after);
+    printf("  global_checksum_before = 0x%lX\n", global_checksum_before);
+    printf("  global_checksum_after  = 0x%lX\n", global_checksum_after);
+    printf("  they are %s\n", (global_size_before==global_size_after && global_checksum_before==global_checksum_after)?"equal":"different");
+  }
+#endif
   delete csr_edges;
   delete csr_index;
 

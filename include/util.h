@@ -36,6 +36,9 @@ extern uint64_t g_begin_ts;
 extern int g_rank;
 extern int g_nprocs;
 
+const uint64_t MMIX_CONSTANT_MULTIPLIER = 6364136223846793005LL;
+const uint64_t MMIX_CONSTANT_INCREMENT  = 1442695040888963407LL;
+
 #define MPI_DEBUG
 
 #ifdef MPI_DEBUG
