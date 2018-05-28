@@ -77,9 +77,59 @@ mpirun --bind-to socket -npersocket 2 --hostfile hostfile.txt -- ./stream_wordco
 echo "拷贝数据"
 mpirun --bind-to none -npernode 1 --hostfile hostfile.txt -- ./script/copy_files.sh
 
+# 分布式资源调度框架
 
+echo "分布式资源调度框架/MPI-YARN/1"
+yarn jar ~/mpi-yarn-1.0.0.jar ai.fma.mpi_yarn.Client -a ./bin/cg.B.16 -j ~/mpi-yarn-1.0.0.jar -p hdfs://phoenix00/user/ybw/staging -lt orte -dp /usr/bin/orted -lp /usr/bin/orterun -N 2 -ppn 8 -vcpn 20 -mbmpn 65536 -mbnpn 65536 -q default -mbam 2048
+echo "分布式资源调度框架/MPI-YARN/2"
+yarn jar ~/mpi-yarn-1.0.0.jar ai.fma.mpi_yarn.Client -a ./busy.py -j ~/mpi-yarn-1.0.0.jar -p hdfs://phoenix00/user/ybw/staging -lt orte -dp /usr/bin/orted -lp /usr/bin/orterun -N 2 -ppn 8 -vcpn 20 -mbmpn 65536 -mbnpn 200000 -q default -mbam 2048
+yarn application -status ${应用的APPID}
+yarn application -kill ${busy.py的APPID}
+
+# 负载均衡
+
+echo "负载均衡/预处理equalvertex"
+mpirun --bind-to socket -npersocket 1 --hostfile hostfile.txt -- ./graph_preprocess ${INPUT_GRAPH_PATH} ${OUTPUT_GRAPH_PATH}_equal_vertex equal_vertex
+
+echo "负载均衡/点划分+静态调度"
+make page_rank_distributed_static_scheduling
+mpirun --bind-to socket -npersocket 1 --hostfile hostfile.txt -- ./page_rank_distributed_static_scheduling ${OUTPUT_GRAPH_PATH}_equal_vertex ${NUM_ITERS} ${CHUNK_SIZE}
+
+echo "负载均衡/块划分+静态调度"
+mpirun --bind-to socket -npersocket 1 --hostfile hostfile.txt -- ./page_rank_distributed_static_scheduling ${OUTPUT_GRAPH_PATH}_chunk256k ${NUM_ITERS} ${CHUNK_SIZE}
+
+echo "负载均衡/点划分+动态调度"
+mpirun --bind-to socket -npersocket 1 --hostfile hostfile.txt -- ./page_rank_distributed ${OUTPUT_GRAPH_PATH}_equal_vertex ${NUM_ITERS} ${CHUNK_SIZE}
+
+echo "负载均衡/块划分+动态调度"
+mpirun --bind-to socket -npersocket 1 --hostfile hostfile.txt -- ./page_rank_distributed ${OUTPUT_GRAPH_PATH}_chunk256k ${NUM_ITERS} ${CHUNK_SIZE}
+
+# CPU亲和性
+
+echo "CPU亲和性/关闭CPU亲和性"
+mpirun --bind-to none -npersocket 1 --hostfile hostfile.txt -- ./page_rank_distributed ${OUTPUT_GRAPH_PATH}_chunk256k ${NUM_ITERS} ${CHUNK_SIZE}
 
 mpirun --bind-to none -npernode 1 --hostfile hostfile.txt -- ./stream_wordcount /mnt/pmem0/staging/ output.txt
+
+# 性能测试/热词分析/延迟
+
+echo "性能测试/热词分析/延迟/数据生成"
+python script/gen_randword.py 4096 > data/small_text.txt
+echo "性能测试/热词分析/延迟/StreamingWordCount"
+mpirun --bind-to socket -npersocket 2 --hostfile hostfile.txt -- ./stream_wordcount /mnt/pmem0/staging/ output.txt 10000 2>&1 | tee result.txt
+echo "性能测试/热词分析/延迟/拷贝数据"
+./script/copy_file_latency.sh
+echo "分析StreamingWordCount结果"
+cat result.txt | grep -e Timestamp -e "Read" | grep "Read from" -B 1 | grep "Timestamp"
+
+echo "性能测试/热词分析/带宽/StreamingWordCount"
+mpirun --bind-to socket -npersocket 2 --hostfile hostfile.txt -- ./stream_wordcount /mnt/pmem0/staging/ output.txt 10000 2>&1 | tee result.txt
+echo "性能测试/热词分析/带宽/拷贝数据"
+mpirun --bind-to none -npernode 1 --hostfile hostfile.txt -- ./script/copy_files.sh
+
+
+echo "性能测试/网页排名"
+
 
 
 

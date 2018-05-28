@@ -711,8 +711,9 @@ struct DistributedPipelineScheduler {
       }
     }
 
-    void start() {
+    void start(uint64_t interval_usec) {
       assert(!started);
+      this->interval_usec = interval_usec;
       worker_thread = std::move(std::thread([this](){ this->worker(); }));
       started = true;
     }
@@ -928,13 +929,13 @@ struct DistributedPipelineScheduler {
     }
   }
 
-  void run() {
+  void run(uint64_t sla_us) {
     for(StageContext& sc : stage_context_list) {
       for(Task& task : sc.tasks) {
         task.launch();
       }
     }
-    flush_timer.start();
+    flush_timer.start(sla_us);
   }
 
   void join() {
@@ -971,9 +972,9 @@ struct Pipeline {
     return result;
   }
 
-  void run() {
+  void run(uint64_t sla_us = 1e6) {
     DistributedPipelineScheduler scheduler(outputs);
-    scheduler.run();
+    scheduler.run(sla_us);
     scheduler.join();
   }
 };

@@ -169,7 +169,8 @@ struct WordCountAccumulateTopKPTransform : public BasePTransform<string, pair<st
     uint64_t op = 0;
     std::mutex mu;
     bool is_eager = this->is_eager;
-    std::thread flush_thread([&mu, &wordcount, &op, &ts, out, is_eager](){
+    uint64_t duration_us = this->duration_us;
+    std::thread flush_thread([duration_us, &mu, &wordcount, &op, &ts, out, is_eager](){
       while (true) {
         {
           std::lock_guard<std::mutex> lk(mu);
@@ -187,7 +188,7 @@ struct WordCountAccumulateTopKPTransform : public BasePTransform<string, pair<st
             op = 0;
           }
         }
-        usleep(5e5);
+        usleep(duration_us);
       }
     });
     while (true) {
@@ -239,6 +240,7 @@ struct WordCountTopKPTransform : public BaseCombinePTransform<pair<string, size_
     uint64_t ts_begin = currentTimeUs();
     uint64_t processed_current_batch = 0;
     uint64_t processed_total = 0;
+    uint64_t duration_us = this->duration_us;
 
     std::mutex mu;
     std::thread flush_thread([&](){
@@ -251,8 +253,8 @@ struct WordCountTopKPTransform : public BaseCombinePTransform<pair<string, size_
             double mops_overall = 1.0 * processed_total / (ts_now - ts_begin);
             ts = ts_now;
             vector<pair<string, size_t>> topk_result = topk();
-            char* datetime = currentDatetime();
-            printf("%s %d> TOPK RESULT\n", rank, datetime);
+            printf("%d> TOPK RESULT\n", rank);
+            printf("   Timestamp in milliseconds = %lu\n", currentTimeUs());
             printf("   Number of words in this batch     = %lu\n", processed_current_batch);
             printf("   Number of words totally processed = %lu\n", processed_total);
             printf("   Performance of current batch = %0.2lf MOPS\n", mops);
@@ -260,11 +262,11 @@ struct WordCountTopKPTransform : public BaseCombinePTransform<pair<string, size_
             for (auto& p : topk_result) {
               printf("%20s %10zu\n", p.first.c_str(), p.second);
             }
-            printf("======================= \n", rank, datetime);
+            printf("======================= \n");
             processed_current_batch = 0;
           }
         }
-        usleep(1e6);
+        usleep(duration_us);
       }
     });
 
@@ -350,10 +352,14 @@ int main(int argc, char* argv[]) {
 
   init_debug();
 
-  assert(argc == 3);
-
   string read_from = argv[1];
   string output_path = argv[2];
+  uint64_t sla_us = 1e6; // sla default 1s
+  if (argc >= 4) {
+    sla_us = atoll(argv[3]);
+  }
+
+  printf("SLA is set to %lu us\n", sla_us);
 
   std::unique_ptr<Pipeline> p = make_pipeline();
   WithDevice(Device::CPU()->all_nodes()->all_sockets()->tasks_per_socket(1));
@@ -366,10 +372,10 @@ int main(int argc, char* argv[]) {
     PCollection<string>* lines = p->apply(TextIO::readTextFromWatch(fs_watch));
     words = lines->apply(ParDo::of(StringSplit())->set_name("string split"));
   }
-  PCollection<pair<string, size_t>>* wordcounts = words->apply(new WordCountAccumulateTopKPTransform(10, 1e6));
+  PCollection<pair<string, size_t>>* wordcounts = words->apply(new WordCountAccumulateTopKPTransform(10, sla_us/4));
 
   WithDevice(Device::CPU()->one_node()->one_socket()->tasks_per_socket(1));
-  wordcounts->apply(new WordCountTopKPTransform(10, 1e6));
+  wordcounts->apply(new WordCountTopKPTransform(10, sla_us));
   // measure_ops(topk);
 //  PCollection<TS<string>>* words_ts = words->apply(ParDo::of(AssignTimestamp<string>())->set_name("assign timestamp"));
 //  PCollection<WN<string>>* words_wn = Window::FixedWindows::assign(words_ts, CPU_GHZ * 5e8);
@@ -379,11 +385,11 @@ int main(int argc, char* argv[]) {
 //  PCollection<string>* outputs = wordcounts->apply(ParDo::of(WordCountToString())->set_name("to string"));
 //  outputs->apply(TextIO::writeAsGarray<256>(driver)->to(output_path.c_str()));
 
-  words->set_next_transform_eager();
+  // words->set_next_transform_eager();
 //  wordcounts->set_next_transform_eager();
 //  outputs->set_next_transform_eager();
 
-  p->run();
+  p->run(sla_us);
 
   RV_Finalize();
   return 0;

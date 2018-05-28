@@ -989,46 +989,40 @@ struct GraphContext {
 
       uint64_t duration = -currentTimeUs();
 
-      while (true) {
-        uint32_t chunk_id = __sync_fetch_and_add(current_chunk_id, 1);
-        if (chunk_id >= num_chunks) {
-          break;
-        }
-        uint32_t chunk_begin = chunk_id*chunk_size;
-        uint32_t chunk_end;
-        if (chunk_id == num_chunks - 1) {
-          chunk_end = frontier_num_nodes;
-        } else {
-          chunk_end = (chunk_id+1)*chunk_size;
-        }
-        for (uint32_t i=chunk_begin; i<chunk_end; i++) {
-          uint64_t u     = *(frontier_begin + i);
-          uint64_t from  = graph.get_index_from_lid(u);
-          uint64_t to    = graph.get_index_from_lid(u+1);
-          ValueT  contrib = vertex_value_op(u);
-          edges_processed += (to-from);
-          for (uint64_t idx=from; idx<to; idx++) {
-            uint32_t vid = graph.get_edge_from_index(idx);
-            int target_rank = graph.get_rank_from_vid(vid);
-            if (target_rank == rank) {
-              uint32_t llid = graph.get_lid_from_vid(vid);
-              UpdateRequest req;
-              req.y=llid;
-              req.contrib=contrib;
-              int target_tid = approx_mod.approx_mod(llid >> UPDATER_BLOCK_SIZE_PO2);
-              size_t next_bytes = channels[tid][target_tid].push_explicit(req, counter[target_tid]);
-              counter[target_tid] = next_bytes;
-            } else {
-              UpdateRequest req;
-              req.y = vid;
-              req.contrib = contrib;
-              int export_id = target_rank & (num_export_threads - 1); // equivalant to mode num_export_threads
-              size_t next_bytes = to_exports[tid][export_id].push_explicit(req, export_counter[export_id]);
-              export_counter[export_id] = next_bytes;
-            }
+#ifdef STATIC_SCHEDULING
+      #warning "Static Scheduling Enabled"
+      #pragma omp for
+#else
+      #pragma omp for schedule(dynamic, chunk_size)
+#endif
+      for (uint32_t i=0; i<frontier_num_nodes; i++) {
+        uint64_t u     = *(frontier_begin + i);
+        uint64_t from  = graph.get_index_from_lid(u);
+        uint64_t to    = graph.get_index_from_lid(u+1);
+        ValueT  contrib = vertex_value_op(u);
+        edges_processed += (to-from);
+        for (uint64_t idx=from; idx<to; idx++) {
+          uint32_t vid = graph.get_edge_from_index(idx);
+          int target_rank = graph.get_rank_from_vid(vid);
+          if (target_rank == rank) {
+            uint32_t llid = graph.get_lid_from_vid(vid);
+            UpdateRequest req;
+            req.y=llid;
+            req.contrib=contrib;
+            int target_tid = approx_mod.approx_mod(llid >> UPDATER_BLOCK_SIZE_PO2);
+            size_t next_bytes = channels[tid][target_tid].push_explicit(req, counter[target_tid]);
+            counter[target_tid] = next_bytes;
+          } else {
+            UpdateRequest req;
+            req.y = vid;
+            req.contrib = contrib;
+            int export_id = target_rank & (num_export_threads - 1); // equivalant to mode num_export_threads
+            size_t next_bytes = to_exports[tid][export_id].push_explicit(req, export_counter[export_id]);
+            export_counter[export_id] = next_bytes;
           }
         }
       }
+
       for (int next_val=0; next_val<num_updater_threads; next_val++) {
         size_t curr_bytes = counter[next_val];
         channels[tid][next_val].flush_and_wait_explicit(curr_bytes);
@@ -1173,9 +1167,9 @@ struct GraphContext {
   void process_sum(MPI_Comm comm, T* array, size_t size, T& global_min_ep, T& global_avg_ep, T& global_max_ep) {
     int nprocs;
     MPI_Comm_size(comm, &nprocs);
-    T min_ep = TypeTrait<T>::getMinValue();
+    T min_ep = TypeTrait<T>::getMaxValue();
     T sum_ep = TypeTrait<T>::getZeroValue();
-    T max_ep = TypeTrait<T>::getMaxValue();
+    T max_ep = TypeTrait<T>::getMinValue();
     for (size_t i=0; i<size; i++) {
       T ep = array[i];
       if (ep > max_ep) max_ep = ep;
