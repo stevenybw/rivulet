@@ -70,7 +70,7 @@ mpirun --bind-to socket -npersocket 1 --hostfile hostfile.txt -- ./bfs_distribut
 
 echo "流处理领域编程范式/StreamingSum"
 mpirun --bind-to none -npernode 1 --hostfile hostfile.txt -- ./stream_sum __random__ output.txt 1.25
-echo "流处理领域编程范式/生成数据文件"
+echo "流处理领域编程范式/生成数据文件(1000000*16个单词)"
 python script/gen_randword.py 1000000 > data/90m_text.txt
 echo "流处理领域编程范式/StreamingWordCount"
 mpirun --bind-to socket -npersocket 2 --hostfile hostfile.txt -- ./stream_wordcount /mnt/pmem0/staging/ output.txt

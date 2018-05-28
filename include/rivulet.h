@@ -52,6 +52,11 @@ struct InputChannel
   virtual const void* poll(size_t bytes)=0;
 };
 
+/*! \brief OutputChannel
+ *
+ *  for implementing:
+ *    1.  the channel should be thread-safe because flush will be called by timer thread.
+ */
 struct OutputChannel
 {
   virtual void close()=0;
@@ -60,6 +65,10 @@ struct OutputChannel
   // Setting is_eager true to flush after each write. This is important if data rate
   // is too low and buffering may cause high latency.
   virtual void push(const void* data, size_t bytes, bool is_eager)=0;
+
+  /*! \brief Flush the content buffered in this channel
+   */
+  virtual void flush()=0;
 };
 
 using InputChannelList = std::vector<InputChannel*>;
@@ -195,14 +204,38 @@ struct LocalInputChannel : public InputChannel
   }
 };
 
+using SpinLock = std::mutex;
+
+// struct SpinLock {
+//   volatile uint64_t data;
+// 
+//   SpinLock() : data(0) {}
+// 
+//   void lock() {
+//     while(true) {
+//       uint64_t old_data = __sync_val_compare_and_swap(&data, 0, 1);
+//       if (old_data == 0) {
+//         break;
+//       }
+//       return;
+//     }
+//   }
+// 
+//   void unlock() {
+//     data = 0;
+//   }
+// };
+
 struct LocalOutputChannel : public OutputChannel
 {
   const static size_t CHANNEL_BYTES = LocalChannelType::CHANNEL_BYTES;
+  SpinLock mu;
   LocalChannelType channel;
 
   LocalOutputChannel(LocalChannelType channel) : channel(channel) { }
 
   void push(const void* data_arg, size_t bytes, bool is_eager) override {
+    mu.lock();
     const char* data = (const char*)data_arg;
     size_t sent = 0;
     while (sent < bytes) {
@@ -213,6 +246,15 @@ struct LocalOutputChannel : public OutputChannel
     if (is_eager) {
       channel.flush_and_wait();
     }
+    mu.unlock();
+  }
+
+  /*! \brief Flush the content buffered in this channel
+   */
+  void flush() override {
+    mu.lock();
+    channel.flush_and_wait();
+    mu.unlock();
   }
 
   void close() override {
@@ -225,6 +267,7 @@ const int MAX_MPI_TAG = (1<<22);
 
 struct MPIOutputChannel : public OutputChannel
 {
+  SpinLock mu;
   const static size_t MPI_BUFFER_BYTES = 128*1024;
   char input_buffer[MPI_BUFFER_BYTES];
   uint64_t used_bytes;
@@ -255,14 +298,21 @@ struct MPIOutputChannel : public OutputChannel
     // printf("rank %d stage %d transform %d task %d> MPI Send %zu bytes end\n", g_rank, tl_stage_id, tl_transform_id, tl_task_id, bytes);
   }
 
-  void flush() {
+  void _flush() {
     if (used_bytes > 0) {
       mpi_send(input_buffer, used_bytes);
       used_bytes = 0;
     }
   }
 
+  void flush() override {
+    mu.lock();
+    _flush();
+    mu.unlock();
+  }
+
   void push(const void* data, size_t bytes, bool is_eager) override {
+    mu.lock();
     if (MPI_BUFFER_BYTES - used_bytes >= bytes) {
       memcpy(&input_buffer[used_bytes], data, bytes);
       used_bytes += bytes;
@@ -272,8 +322,9 @@ struct MPIOutputChannel : public OutputChannel
       used_bytes = bytes;
     }
     if (is_eager) {
-      flush();
+      _flush();
     }
+    mu.unlock();
   }
 
   void close() override {
@@ -629,6 +680,44 @@ struct DistributedPipelineScheduler {
     std::vector<WorkerDescriptor>& get_workers()    { return workers; }
   };
 
+  /*! \brief Flush Timer
+   *
+   *  A timer that is dedicated for flushing content stored in channel buffer. This is necessary
+   *  to guarantee the system's eventual consistency.
+   */
+  struct FlushTimer
+  {
+    bool started;
+    OutputChannelList output_channels;
+    uint64_t          interval_usec;
+    std::thread       worker_thread;
+
+    FlushTimer() : FlushTimer(1e6) {}
+    FlushTimer(uint64_t interval_usec) : started(false), interval_usec(interval_usec) {}
+
+    void registerOutputChannel(OutputChannel* output_channel) {
+      output_channels.push_back(output_channel);
+    }
+
+    void worker() {
+      while (true) {
+        uint64_t duration = -currentTimeUs();
+        for (OutputChannel* oc : output_channels) {
+          oc->flush();
+        }
+        duration += currentTimeUs();
+        // printf("%zu output channels flushed in %lu us\n", output_channels.size(), duration);
+        usleep(interval_usec);
+      }
+    }
+
+    void start() {
+      assert(!started);
+      worker_thread = std::move(std::thread([this](){ this->worker(); }));
+      started = true;
+    }
+  };
+
   struct Task 
   {
     int  stage_id;
@@ -717,6 +806,7 @@ struct DistributedPipelineScheduler {
 
   int rank;
   int nprocs;
+  FlushTimer flush_timer;
   std::vector<Stage> stages;
   std::vector<StageContext> stage_context_list;
   ChannelMgr channel_mgr;
@@ -762,6 +852,11 @@ struct DistributedPipelineScheduler {
     }
   }
 
+  /*! \brief After the stages been extracted, we can construct the tasks
+   *
+   *  1. replicate each stage into tasks
+   *  2. establish necessary channels
+   */
   void construct_tasks() {
     for (uint64_t stage_id=0; stage_id<stages.size(); stage_id++) {
       Stage& stage = stages[stage_id];
@@ -794,6 +889,7 @@ struct DistributedPipelineScheduler {
           std::tie(output_channel, input_channel) = channel_mgr.create_local_channels();
           task.intermediate_output_channels.push_back(output_channel);
           task.intermediate_input_channels.push_back(input_channel);
+          flush_timer.registerOutputChannel(output_channel);
         }
         if (stage_id < stages.size() - 1) {
           Stage& next_stage = stages[stage_id + 1];
@@ -802,6 +898,7 @@ struct DistributedPipelineScheduler {
             int worker_lid  = wd.lid();
             OutputChannel* output_channel = channel_mgr.create_output_channel(worker_rank, stage_id, local_worker_id, worker_lid);
             task.stage_output_channels.push_back(output_channel);
+            flush_timer.registerOutputChannel(output_channel);
           }
         }
         stageContext.tasks.push_back(std::move(task));
@@ -837,6 +934,7 @@ struct DistributedPipelineScheduler {
         task.launch();
       }
     }
+    flush_timer.start();
   }
 
   void join() {

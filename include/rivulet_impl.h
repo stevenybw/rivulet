@@ -543,6 +543,7 @@ struct TextIO {
         while (std::getline(fin, line)) {
           Serdes<string>::stream_serialize(out, line, this->is_eager);
         }
+        // out->flush();
       }
     }
   };

@@ -66,6 +66,10 @@ uint64_t currentTimestamp();
  */
 uint64_t currentTimeUs();
 
+/*! \brief Get current textual representation of current date and time
+ */
+char* currentDatetime();
+
 string filename_append_postfix(string filename, int rank, int nprocs);
 bool  is_power_of_2(uint64_t num);
 void* malloc_pinned(size_t size);

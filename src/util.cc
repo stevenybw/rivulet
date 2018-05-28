@@ -76,6 +76,12 @@ uint64_t currentTimeUs()
   return tv.tv_usec + 1000000 * tv.tv_sec;
 }
 
+char* currentDatetime()
+{
+  time_t t = time(nullptr);
+  return asctime(localtime(&t));
+}
+
 string filename_append_postfix(string filename, int rank, int nprocs) {
   return filename + "." + to_string(rank) + "." + to_string(nprocs);
 }

@@ -167,22 +167,35 @@ struct WordCountAccumulateTopKPTransform : public BasePTransform<string, pair<st
     OutputChannel* out = outputs[0];
     uint64_t ts = currentTimeUs();
     uint64_t op = 0;
+    std::mutex mu;
+    bool is_eager = this->is_eager;
+    std::thread flush_thread([&mu, &wordcount, &op, &ts, out, is_eager](){
+      while (true) {
+        {
+          std::lock_guard<std::mutex> lk(mu);
+          if (wordcount.size() > 0) {
+            uint64_t ts_now = currentTimeUs();
+            double kops = 1.0e3 * op / (ts_now - ts);
+            PRINTF("%d.%d> Accumulate performance = %lf KOPS\n", rank, tl_task_id, kops);
+            for(const pair<string, size_t>& entry : wordcount) {
+              Serdes<pair<string, size_t>>::stream_serialize(out, entry, false);
+              PRINTF("%s %zu\n", entry.first.c_str(), entry.second);
+            }
+            out->flush();
+            wordcount.clear();
+            ts = currentTimeUs();
+            op = 0;
+          }
+        }
+        usleep(5e5);
+      }
+    });
     while (true) {
       string in_element = Serdes<string>::stream_deserialize(in);
+      PRINTF("%s\n", in_element.c_str());
+      std::lock_guard<std::mutex> lk(mu);
       wordcount[in_element]++;
       op++;
-      uint64_t ts_now = currentTimeUs();
-      if (ts_now - ts > duration_us) {
-        double kops = 1.0e3 * op / (ts_now - ts);
-        printf("%d.%d> Accumulate performance = %lf KOPS\n", rank, tl_task_id, kops);
-        for(const pair<string, size_t>& entry : wordcount) {
-          Serdes<pair<string, size_t>>::stream_serialize(out, entry, this->is_eager);
-          // printf("%s %zu\n", entry.first.c_str(), entry.second);
-        }
-        wordcount.clear();
-        ts = currentTimeUs();
-        op = 0;
-      }
     }
   }
 };
@@ -223,23 +236,51 @@ struct WordCountTopKPTransform : public BaseCombinePTransform<pair<string, size_
     InputChannel* in = in_channel;
     OutputChannel* out = out_channel;
     uint64_t ts = currentTimeUs();
-    uint64_t op = 0;
+    uint64_t ts_begin = currentTimeUs();
+    uint64_t processed_current_batch = 0;
+    uint64_t processed_total = 0;
+
+    std::mutex mu;
+    std::thread flush_thread([&](){
+      while (true) {
+        {
+          if (processed_current_batch > 0) {
+            std::lock_guard<std::mutex> lk(mu);
+            uint64_t ts_now = currentTimeUs();
+            double mops = 1.0 * processed_current_batch / (ts_now - ts);
+            double mops_overall = 1.0 * processed_total / (ts_now - ts_begin);
+            ts = ts_now;
+            vector<pair<string, size_t>> topk_result = topk();
+            char* datetime = currentDatetime();
+            printf("%s %d> TOPK RESULT\n", rank, datetime);
+            printf("   Number of words in this batch     = %lu\n", processed_current_batch);
+            printf("   Number of words totally processed = %lu\n", processed_total);
+            printf("   Performance of current batch = %0.2lf MOPS\n", mops);
+            printf("   Overall Performance          = %0.2lf MOPS\n", mops_overall);
+            for (auto& p : topk_result) {
+              printf("%20s %10zu\n", p.first.c_str(), p.second);
+            }
+            printf("======================= \n", rank, datetime);
+            processed_current_batch = 0;
+          }
+        }
+        usleep(1e6);
+      }
+    });
+
+    bool inited = false;
     while (true) {
       pair<string, size_t> in_element = Serdes<pair<string, size_t>>::stream_deserialize(in);
-      //std::lock_guard<std::mutex> lk(mu);
-      wordcount[in_element.first] += in_element.second;
-      op++;
-      uint64_t ts_now = currentTimeUs();
-      if (ts_now - ts > duration_us) {
-        double kops = 1.0e3 * op / (ts_now - ts);
-        ts = currentTimeUs();
-        op = 0;
-        vector<pair<string, size_t>> topk_result = topk();
-        printf("TOPK RESULT\n");
-        for (auto& p : topk_result) {
-          printf("%20s %10zu\n", p.first.c_str(), p.second);
-        }
+      std::lock_guard<std::mutex> lk(mu);
+      if (!inited) {
+        inited = true;
+        ts_begin = currentTimeUs();
+        ts = ts_begin;
       }
+      PRINTF("%s %zu\n", in_element.first.c_str(), in_element.second);
+      processed_current_batch += in_element.second;
+      processed_total += in_element.second;
+      wordcount[in_element.first] += in_element.second;
     }
   }
 };
@@ -247,56 +288,56 @@ struct WordCountTopKPTransform : public BaseCombinePTransform<pair<string, size_
 /*! \brief Combine Function for Word Count + TopK
  *
  */
-struct WordCountTopKFn : public CombineFn<string, map<string, int>, map<string, int>>
-{
-  int K;
-  WordCountTopKFn(int K) : K(K) {}
-
-  map<string, int>* createAccumulator() override {
-    return new map<string, int>();
-  }
-
-  void resetAccumulator(map<string, int>* acc) override {
-    acc->clear();
-  }
-
-  void addInput(map<string, int>* acc, const string& rhs) override {
-    (*acc)[rhs]++;
-  }
-
-  // TODO: Who free those allocated objects?
-  map<string, int>* mergeAccumulators(const std::list<map<string, int>*>& accumulators) override {
-    map<string, int>* result_acc = createAccumulator();
-    for (auto acc : accumulators) {
-      for(auto& kv : (*acc)) {
-        const string& word = kv.first;
-        int count = kv.second;
-        (*result_acc)[word] += count;
-      }
-    }
-    return result_acc;
-  }
-
-  map<string, int> extractOutput(map<string, int>* acc) {
-    using Pair = std::pair<int, string>;
-    using Heap = priority_queue<Pair, std::vector<Pair>, std::greater<Pair>>;
-    Heap heap;
-    for(auto it=acc->begin(); it!=acc->end(); it++) {
-      heap.emplace(std::make_pair(it->second, it->first));
-      if (heap.size() > K) {
-        heap.pop();
-      }
-    }
-
-    std::map<string, int> result;
-    while (! heap.empty()) {
-      const Pair& top = heap.top();
-      result.emplace(std::make_pair(top.second, top.first));
-      heap.pop();
-    }
-    return std::move(result);
-  }
-};
+// struct WordCountTopKFn : public CombineFn<string, map<string, int>, map<string, int>>
+// {
+//   int K;
+//   WordCountTopKFn(int K) : K(K) {}
+// 
+//   map<string, int>* createAccumulator() override {
+//     return new map<string, int>();
+//   }
+// 
+//   void resetAccumulator(map<string, int>* acc) override {
+//     acc->clear();
+//   }
+// 
+//   void addInput(map<string, int>* acc, const string& rhs) override {
+//     (*acc)[rhs]++;
+//   }
+// 
+//   // TODO: Who free those allocated objects?
+//   map<string, int>* mergeAccumulators(const std::list<map<string, int>*>& accumulators) override {
+//     map<string, int>* result_acc = createAccumulator();
+//     for (auto acc : accumulators) {
+//       for(auto& kv : (*acc)) {
+//         const string& word = kv.first;
+//         int count = kv.second;
+//         (*result_acc)[word] += count;
+//       }
+//     }
+//     return result_acc;
+//   }
+// 
+//   map<string, int> extractOutput(map<string, int>* acc) {
+//     using Pair = std::pair<int, string>;
+//     using Heap = priority_queue<Pair, std::vector<Pair>, std::greater<Pair>>;
+//     Heap heap;
+//     for(auto it=acc->begin(); it!=acc->end(); it++) {
+//       heap.emplace(std::make_pair(it->second, it->first));
+//       if (heap.size() > K) {
+//         heap.pop();
+//       }
+//     }
+// 
+//     std::map<string, int> result;
+//     while (! heap.empty()) {
+//       const Pair& top = heap.top();
+//       result.emplace(std::make_pair(top.second, top.first));
+//       heap.pop();
+//     }
+//     return std::move(result);
+//   }
+// };
 
 int main(int argc, char* argv[]) {
   Dictionary dict;
