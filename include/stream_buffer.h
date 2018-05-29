@@ -21,7 +21,7 @@ public:
   virtual void on_wait(int buffer_id)=0;
 };
 
-/*! \brief StreamBuffer<T> provides an abstraction for multiple threads streaming write and process.
+/*! \brief <DEPRECATED> StreamBuffer<T> provides an abstraction for multiple threads streaming write and process.
  *  Multiple producers may call update
  *  Template
  *    minibatch_buffer_size_per_partition: thread-local minibatch for the stream buffer

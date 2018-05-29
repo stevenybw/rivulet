@@ -14,6 +14,7 @@
 #include "common.h"
 #include "graph.h"
 #include "util.h"
+#include <immintrin.h>
 
 template <typename VertexId, typename ValueT>
 struct GeneralUpdateRequest {
@@ -41,6 +42,33 @@ struct Memcpy<GeneralUpdateRequest<uint32_t, double>>
       _mm_stream_pd((double*)&dest[i+1], rhs[i+1]);
       _mm_stream_pd((double*)&dest[i+2], rhs[i+2]);
       _mm_stream_pd((double*)&dest[i+3], rhs[i+3]);
+    }
+  }
+
+  static void StreamingStoreUnrolledB(void* destptr, const GeneralUpdateRequest<uint32_t, double>* rhsptr, int num_element) {
+    //assert(sizeof(GeneralUpdateRequest<uint32_t, double>) == 16);
+    __m256d* dest = (__m256d*) destptr;
+    __m256d* rhs  = (__m256d*) rhsptr;
+    int num_packet = num_element/2;
+    for (int i=0; i<num_packet; i+=2) {
+      _mm256_stream_pd((double*)&dest[0], rhs[0]);
+      _mm256_stream_pd((double*)&dest[1], rhs[1]);
+    }
+  }
+
+  static void StreamingStoreUnrolledA(void* destptr, const GeneralUpdateRequest<uint32_t, double>* rhsptr, int num_element) {
+    //assert(sizeof(GeneralUpdateRequest<uint32_t, double>) == 16);
+    __m128d* dest = (__m128d*) destptr;
+    __m128d* rhs  = (__m128d*) rhsptr;
+    for (int i=0; i<num_element; i+=4) {
+      __m128d rhs_0 = rhs[i];
+      __m128d rhs_1 = rhs[i+1];
+      __m128d rhs_2 = rhs[i+2];
+      __m128d rhs_3 = rhs[i+3];
+      _mm_stream_pd((double*)&dest[i], rhs_0);
+      _mm_stream_pd((double*)&dest[i+1], rhs_1);
+      _mm_stream_pd((double*)&dest[i+2], rhs_2);
+      _mm_stream_pd((double*)&dest[i+3], rhs_3);
     }
   }
 

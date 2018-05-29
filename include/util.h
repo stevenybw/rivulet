@@ -458,9 +458,15 @@ struct ThreadLocalMemoryPool
   char*  data;
 
   ThreadLocalMemoryPool(size_t capacity) : pos(0), capacity(capacity) {
-    data = (char*) memalign(4096, capacity);
+    data = (char*) memalign(1024*1024, capacity);
     assert(data != nullptr);
   }
+
+  ~ThreadLocalMemoryPool() {
+    free(data);
+  }
+
+  void reset() { pos = 0; }
 
   /*! \brief Allocate num_element T
    */
