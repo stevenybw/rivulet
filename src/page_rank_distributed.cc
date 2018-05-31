@@ -104,17 +104,6 @@ int main(int argc, char* argv[]) {
     printf("  total_num_edges = %llu\n", graph.total_num_edges());
   }
 
-  size_t num_nodes = graph.local_num_nodes();
-  LINES;
-  double* src = (double*) malloc_pinned(num_nodes * sizeof(double));
-  double* next_val = (double*) malloc_pinned(num_nodes * sizeof(double));
-  LINES;
-
-  for (size_t i=0; i<num_nodes; i++) {
-    src[i] = 0.0;
-    next_val[i] = 1.0 - alpha;
-  }
-
   LaunchConfig launch_config;
   launch_config.load_from_config_file("launch.conf");
   // launch_config.distributed_round_robin_socket(rank, g_num_sockets);
@@ -122,6 +111,47 @@ int main(int argc, char* argv[]) {
     launch_config.show();
   }
   GraphContext graph_context(launch_config);
+
+  size_t num_nodes = graph.local_num_nodes();
+  LINES;
+  double* src = (double*) malloc_pinned(num_nodes * sizeof(double));
+  double* next_val = (double*) malloc_pinned(num_nodes * sizeof(double));
+  LINES;
+
+  uint64_t global_empty_node = 0;
+  {
+    double* in_degree = src;
+    double* out_degree = next_val;
+
+    #pragma omp parallel for
+    for(int i=0; i<num_nodes; i++) {
+      in_degree[i] = 0.0;
+      out_degree[i] = (double) graph.get_out_degree(i);
+    }
+
+    VertexRange<uint32_t> all_vertex(0, num_nodes);
+    auto vertex_value_op = [](uint32_t u) { return 1.0; };
+    auto on_update_op = [in_degree](uint32_t v, double value) { in_degree[v] += 1; };
+    auto on_update_gen = [&on_update_op]() { return on_update_op; };
+    graph_context.compute_push_delegate<double, decltype(on_update_op)>(graph, all_vertex.begin(), all_vertex.end(), vertex_value_op, on_update_gen, chunk_size);
+    
+    uint64_t empty_nodes = 0;
+    #pragma omp parallel for reduction(+: empty_nodes)
+    for(int i=0; i<num_nodes; i++) {
+      if (in_degree[i] == 0 && out_degree[i] == 0) {
+        empty_nodes++;
+      }
+    }
+    MPI_Allreduce(&empty_nodes, &global_empty_node, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
+    if (rank == 0) {
+      printf("total number of empty nodes (in deg & out deg both are zero): %lu\n", global_empty_node);
+    }
+  }
+
+  for (size_t i=0; i<num_nodes; i++) {
+    src[i] = 0.0;
+    next_val[i] = 1.0 - alpha;
+  }
 
   double sum_duration = 0.0;
 
@@ -158,7 +188,7 @@ int main(int argc, char* argv[]) {
 
     sum_duration += (1e-6 * duration);
     if (rank == 0) {
-      cout << "Iteration " << iter << " sum=" << setprecision(14) << global_sum << " duration=" << setprecision(6) << (1e-6 * duration) << "sec" << endl; 
+      cout << "Iteration " << iter << " sum=" << setprecision(14) << global_sum << " sum (without empty vertex)=" << setprecision(14) << (global_sum - global_empty_node*(1.0-alpha))  << " duration=" << setprecision(6) << (1e-6 * duration) << "sec" << endl; 
     }
   }
 

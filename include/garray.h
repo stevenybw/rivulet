@@ -28,6 +28,49 @@ struct GArray
     delete _obj;
   }
   T& operator[](size_t idx) { return _data[idx]; }
+
+  /*! \brief Get the communicator of this GArray
+   */
+  MPI_Comm communicator() {
+    return _obj->communicator();
+  }
+
+  /*! \brief Get the partition id this process is in
+   */
+  int partition_id() {
+    int rank;
+    MPI_Comm_rank(_obj->communicator(), &rank);
+    return rank;
+  }
+
+  /*! \brief Get the number of partitions this GArray has
+   */
+  int num_partitions() {
+    int nprocs;
+    MPI_Comm_size(_obj->communicator(), &nprocs);
+    return nprocs;
+  }
+
+  template <typename AccT, typename AccOp, typename MergeOp>
+  AccT accumulate(AccT init, int mpi_count, MPI_Datatype mpi_type, MPI_Op mpi_op, AccOp acc_op, MergeOp merge_op) {
+    // get max node id for each partitions
+    AccT acc_sum = init;
+    uint64_t local_size = this->size();
+    T* data = this->data();
+    #pragma omp parallel
+    {
+      AccT local_acc_sum = init;
+      #pragma omp for
+      for (uint64_t i=0; i<local_size; i++) {
+        local_acc_sum = acc_op(local_acc_sum, data[i]);
+      }
+      #pragma omp critical
+      acc_sum = merge_op(acc_sum, local_acc_sum);
+    }
+    AccT global_acc_sum = init;
+    MPI_Allreduce(&acc_sum, &global_acc_sum, mpi_count, mpi_type, mpi_op, _obj->communicator());
+    return global_acc_sum;
+  }
   
   size_t size() { return _size; }
 

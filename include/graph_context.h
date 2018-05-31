@@ -14,6 +14,7 @@
 #include "common.h"
 #include "graph.h"
 #include "util.h"
+#include <emmintrin.h>
 #include <immintrin.h>
 
 template <typename VertexId, typename ValueT>
@@ -24,6 +25,36 @@ struct GeneralUpdateRequest {
 
 template <typename T>
 struct Memcpy {};
+
+template <>
+struct Memcpy<GeneralUpdateRequest<uint32_t, uint32_t>>
+{
+  static void StreamingStoreUnrolled(void* destptr, const GeneralUpdateRequest<uint32_t, uint32_t>* rhsptr, int num_element) {
+    assert(num_element>=8);
+    // 4 element is a pack
+    __m256d* dest = (__m256d*) destptr;
+    __m256d* rhs  = (__m256d*) rhsptr;
+    int num_packet = num_element/4;
+    for (int i=0; i<num_packet; i+=2) {
+      _mm256_stream_pd((double*)&dest[0], rhs[0]);
+      _mm256_stream_pd((double*)&dest[1], rhs[1]);
+    }
+  }
+
+  static void StreamingStore(void* destptr, const GeneralUpdateRequest<uint32_t, uint32_t>* rhsptr, int num_element) {
+    assert(sizeof(GeneralUpdateRequest<uint32_t, uint32_t>) == 8);
+    long long int* dest = (long long int*) destptr;
+    long long int* rhs  = (long long int*) rhsptr;
+    for (int i=0; i<num_element; i++) {
+      _mm_stream_si64(&dest[i], rhs[i]);
+    }
+  }
+
+  static void PrefetchNTA(const GeneralUpdateRequest<uint32_t, uint32_t>* destptr) {
+    _mm_prefetch(&destptr[0], _MM_HINT_T0);
+    _mm_prefetch(&destptr[8], _MM_HINT_T1);
+  }
+};
 
 template <>
 struct Memcpy<GeneralUpdateRequest<uint32_t, double>>

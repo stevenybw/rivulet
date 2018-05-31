@@ -56,7 +56,7 @@ struct ExecutionContext {
   string nvm_oncache_staging_path;
 
   // Random State
-  // random_device            _rand_dev;
+  random_device            _rand_dev;
   default_random_engine    _rand_gen;
   uniform_int_distribution<uint64_t> _rand_dist;
 
@@ -69,9 +69,9 @@ struct ExecutionContext {
               dram_staging_path(dram_staging_path), 
               nvm_offcache_staging_path(nvm_offcache_staging_path), 
               nvm_oncache_staging_path(nvm_oncache_staging_path),
-              // _rand_dev(),
-              // _rand_gen(_rand_dev()),
-              _rand_gen(),
+              _rand_dev(),
+              _rand_gen(_rand_dev()),
+              // _rand_gen(),
               comm(comm) {
     MPI_Comm_rank(comm, &rank);
     MPI_Comm_size(comm, &nprocs);
@@ -551,6 +551,11 @@ struct Driver
   //   }
   // }
 
+  /*! \brief Originally the graph is represented using edge list
+   *
+   *  Be aware of the zero-out-degree vertex. If vertex v does not have out-edge, and all the in-edges are in other aprtitions, it does not know how many masters this partition have. Thus,
+   *  global information is required to know exactly how many masters it have.
+   */
   template <typename NodeT, typename IndexT, typename PartFnType, typename OffsetFnType>
   tuple<GArray<NodeT>*, GArray<IndexT>*> make_csr_from_tuples(GArray<pair<NodeT, NodeT>>* garr_tuples, const PartFnType& part_fn, const OffsetFnType& offset_fn, ObjectRequirement edges_obj_req, ObjectRequirement index_obj_req) {
     assert(edges_obj_req.is_type_create());
@@ -560,39 +565,54 @@ struct Driver
     
     GArray<NodeT>* garr_edges = create_array<NodeT>(edges_obj_req, num_edges);
     NodeT* edges = garr_edges->data();
-    // verify the order of input tuples, and get max local master vid.
-    uint64_t max_local_master_vid = 0;
-    #pragma omp parallel for reduction(max: max_local_master_vid)
-    for (uint64_t i=0; i<num_edges; i++) {
-      NodeT x = tuples[i].first;
-      NodeT y = tuples[i].second;
-      {
-        assert(part_fn(x) == rank);
-        uint64_t vid = offset_fn(x);
-        if (vid > max_local_master_vid) {
-          max_local_master_vid = vid;
-        }
+
+    int my_partition_id   = garr_edges->partition_id();
+    int num_partitions = garr_edges->num_partitions();
+    // get max node id for each partitions
+    uint64_t max_node_id[num_partitions];
+    for(int i=0; i<num_partitions; i++) {
+      max_node_id[i] = 0;
+    }
+    #pragma omp parallel
+    {
+      uint64_t local_max_node_id[num_partitions];
+      for(int i=0; i<num_partitions; i++) {
+        local_max_node_id[i] = 0;
       }
-      {
-        if (part_fn(y) == rank) {
+      #pragma omp for 
+      for (uint64_t i=0; i<num_edges; i++) {
+        NodeT x = tuples[i].first;
+        NodeT y = tuples[i].second;
+        {
+          int part_id = part_fn(x);
+          assert(part_id == rank);
+          uint64_t vid = offset_fn(x);
+          local_max_node_id[part_id] = max(local_max_node_id[part_id], vid);
+        }
+        {
+          int part_id = part_fn(y);
           uint64_t vid = offset_fn(y);
-          if (vid > max_local_master_vid) {
-            max_local_master_vid = vid;
+          local_max_node_id[part_id] = max(local_max_node_id[part_id], vid);
+        }
+        if (i != 0) {
+          if (tuples[i-1].first == tuples[i].first) {
+            assert(tuples[i-1].second <= tuples[i].second);
+          } else {
+            assert(tuples[i-1].first < tuples[i].first);
           }
         }
+        edges[i] = y;
       }
-      if (i != 0) {
-        if (tuples[i-1].first == tuples[i].first) {
-          assert(tuples[i-1].second <= tuples[i].second);
-        } else {
-          assert(tuples[i-1].first < tuples[i].first);
-        }
+      #pragma omp critical
+      for(int i=0; i<num_partitions; i++) {
+        max_node_id[i] = max(max_node_id[i], local_max_node_id[i]);
       }
-      edges[i] = y;
     }
+    uint64_t global_max_node_id[num_partitions];
+    MPI_Allreduce(max_node_id, global_max_node_id, num_partitions, TypeTrait<uint64_t>::getMPIType(), MPI_MAX, garr_edges->communicator());
     // largest node id in this partition
-    uint64_t largest_offset = max_local_master_vid;
-    uint64_t num_nodes = largest_offset + 1;
+    uint64_t largest_offset = global_max_node_id[my_partition_id];
+    uint64_t num_nodes = largest_offset + 1; // number of masters this partition has
     GArray<IndexT>* garr_index = create_array<IndexT>(index_obj_req, num_nodes+1);
     IndexT* index = garr_index->data();
     IndexT last_index = 0;

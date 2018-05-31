@@ -324,6 +324,10 @@ struct DistributedGraph
     return _edges[index];
   }
 
+  IndexT get_out_degree(NodeT vid) const {
+    return _index[vid+1] - _index[vid];
+  }
+
   int get_rank_from_vid(uint64_t vid) const {
     int pid = vid >> partition_offset_bits;
     assert(pid < _nprocs);

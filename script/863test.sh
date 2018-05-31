@@ -65,6 +65,15 @@ mpirun --bind-to socket -npersocket 1 --hostfile hostfile.txt -- ./page_rank_dis
 echo "图领域编程范式/BFS/uk-2007-05"
 mpirun --bind-to socket -npersocket 1 --hostfile hostfile.txt -- ./bfs_distributed ${OUTPUT_GRAPH_PATH_UK}_chunk256k ${NUM_ITERS} ${CHUNK_SIZE} 0 0
 
+echo "Ligra验证（切换到平台bic05）"
+cd /home/ybw/OpenSourceCode/ligra/inputs/twitter-2010
+../../apps/PageRank -b twitter-2010
+../../apps/BFS -b twitter-2010
+
+cd /home/ybw/OpenSourceCode/ligra/inputs/uk-2007-05
+../../apps/PageRank -b uk-2007-05
+../../apps/BFS -b uk-2007-05
+
 
 # 流处理
 

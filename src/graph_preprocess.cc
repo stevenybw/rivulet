@@ -112,6 +112,19 @@ int main(int argc, char* argv[])
   uint64_t total_num_nodes = config.get_uint64("total_num_nodes");
   uint64_t total_num_edges = config.get_uint64("total_num_edges");
   GArray<pair<uint32_t, uint32_t>>* graph_tuples = driver->readFromBinaryRecords<pair<uint32_t, uint32_t>>(graph_path + ".tuples");
+  uint32_t global_max_vid = graph_tuples->accumulate<uint32_t>(0, 1, MPI_UNSIGNED, MPI_MAX, [](uint32_t acc, const pair<uint32_t, uint32_t>& pair){
+    uint32_t next_acc = max(acc, pair.first);
+    next_acc = max(next_acc, pair.second);
+    return next_acc;
+  },
+  [](uint32_t acc1, uint32_t acc2) {
+    return max(acc1, acc2);
+  });
+  if (rank == 0) {
+    printf("Number of Nodes in Original Graph: %u\n", global_max_vid + 1);
+    printf("Number of Nodes in Config File: %lu\n", total_num_nodes);
+  }
+
   if (rank == 0) {
     printf("Remap ID For Tuples Using %s\n", method.c_str());
   }
