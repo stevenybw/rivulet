@@ -45,10 +45,24 @@ const uint64_t MMIX_CONSTANT_INCREMENT  = 1442695040888963407LL;
 #define assert(COND) do{if(!(COND)) {printf("ASSERTION VIOLATED, PROCESS pid = %d PAUSED\n", getpid()); while(1);}}while(0)
 #endif
 
+// GCC features
+//    see https://stackoverflow.com/questions/30130930/is-there-a-compiler-hint-for-gcc-to-force-branch-prediction-to-always-go-a-certa
+#define LIKELY(condition) __builtin_expect(static_cast<bool>(condition), 1)
+#define UNLIKELY(condition) __builtin_expect(static_cast<bool>(condition), 0)
+
 void init_debug();
 
 void  am_free(void* ptr);
 void* am_memalign(size_t align, size_t size);
+
+/*! \brief Convert as follows: (support k, m, g)
+ *
+ *  1024 -> 1024
+ *  1024K -> 1048576
+ *  1024k -> 1048576
+ *  1M -> 1048576
+ */
+size_t convert_unit(string number);
 
 /*! \brief Current absolute timestamp
  *
@@ -458,10 +472,11 @@ struct ThreadLocalMemoryPool
 {
   size_t pos;
   size_t capacity;
+  size_t alignment;
   char*  data;
 
-  ThreadLocalMemoryPool(size_t capacity) : pos(0), capacity(capacity) {
-    data = (char*) memalign(1024*1024, capacity);
+  ThreadLocalMemoryPool(size_t capacity, size_t alignment=4096) : pos(0), capacity(capacity), alignment(alignment) {
+    data = (char*) memalign(alignment, capacity);
     assert(data != nullptr);
   }
 

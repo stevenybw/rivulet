@@ -87,6 +87,30 @@ struct Memcpy<GeneralUpdateRequest<uint32_t, double>>
     }
   }
 
+  static void StreamingStoreUnrolled128Byte(void* destptr, const GeneralUpdateRequest<uint32_t, double>* rhsptr, int num_element) {
+    //assert(sizeof(GeneralUpdateRequest<uint32_t, double>) == 16);
+    __m256d* dest = (__m256d*) destptr;
+    __m256d* rhs  = (__m256d*) rhsptr;
+    __m256d rhs_0 = _mm256_load_pd((const double*) &rhs[0]);
+    __m256d rhs_1 = _mm256_load_pd((const double*) &rhs[1]);
+    __m256d rhs_2 = _mm256_load_pd((const double*) &rhs[2]);
+    __m256d rhs_3 = _mm256_load_pd((const double*) &rhs[3]);
+    _mm256_stream_pd((double*)&dest[0], rhs_0);
+    _mm256_stream_pd((double*)&dest[1], rhs_1);
+    _mm256_stream_pd((double*)&dest[2], rhs_2);
+    _mm256_stream_pd((double*)&dest[3], rhs_3);
+  }
+
+  static void StreamingStoreUnrolled64Byte(void* destptr, const GeneralUpdateRequest<uint32_t, double>* rhsptr, int num_element) {
+    //assert(sizeof(GeneralUpdateRequest<uint32_t, double>) == 16);
+    __m256d* dest = (__m256d*) destptr;
+    __m256d* rhs  = (__m256d*) rhsptr;
+    __m256d rhs_0 = _mm256_load_pd((const double*) &rhs[0]);
+    __m256d rhs_1 = _mm256_load_pd((const double*) &rhs[1]);
+    _mm256_stream_pd((double*)&dest[0], rhs_0);
+    _mm256_stream_pd((double*)&dest[1], rhs_1);
+  }
+
   static void StreamingStoreUnrolledA(void* destptr, const GeneralUpdateRequest<uint32_t, double>* rhsptr, int num_element) {
     //assert(sizeof(GeneralUpdateRequest<uint32_t, double>) == 16);
     __m128d* dest = (__m128d*) destptr;

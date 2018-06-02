@@ -34,7 +34,7 @@
 using namespace std;
 
 constexpr size_t MPI_SEND_BUFFER_SIZE = 1*1024*1024;
-constexpr size_t COMBINE_BUFFER_SIZE  = 128;
+constexpr size_t COMBINE_BUFFER_SIZE  = 128; // Please search StreamingStoreUnrolled64Byte or StreamingStoreUnrolled128Byte
 constexpr size_t NUM_BUCKETS          = 1024;
 
 using UpdateRequest = GeneralUpdateRequest<uint32_t, double>;
@@ -227,6 +227,7 @@ struct VertexUpdater
   void _worker(int worker_id) {
     uint64_t edges_processed = 0;
     uint64_t duration = -currentTimeUs();
+    uint64_t active_duration = 0;
     try {
       assert(worker_id>=0 && worker_id < num_workers);
       ConcurrentWRQueue& requests = workers_requests[worker_id];
@@ -235,11 +236,14 @@ struct VertexUpdater
         UpdateRequest* reqs = (UpdateRequest*) req.data;
         uint64_t       size = req.size;
         edges_processed += size;
+        active_duration -= currentTimeUs();
         for(uint64_t i=0; i<size; i++) {
           uint32_t y = reqs[i].y;
           double contrib = reqs[i].contrib;
           next_val[y] += contrib;
+          _mm_prefetch(&reqs[i+64], _MM_HINT_T1);
         }
+        active_duration += currentTimeUs();
         req.size = 0;
         responds.push(req);
       }
@@ -252,7 +256,8 @@ struct VertexUpdater
         cond_num_worker_done.notify_one(); // only one thread may be allowed to call drain_and_join
       }
       duration += currentTimeUs();
-      printf("[Worker Thread %d] Done edges_processed  %lu\n", worker_id, edges_processed);
+      double active_gpeps = 1e-3 * edges_processed / active_duration;
+      printf("[Worker Thread %d] Done edges_processed  %lu   Active Throughput  %lf GPEPS\n", worker_id, edges_processed, active_gpeps);
       return;
     }
   }
@@ -269,13 +274,14 @@ int main(int argc, char* argv[]) {
   g_rank = rank;
   g_nprocs = nprocs;
 
-  CommandLine cmdline(argc, argv, 6, {"num_workers", "graph_path", "num_iters", "enable_nvdimm", "chunk_size", "run_mode"}, {nullptr, nullptr, nullptr, "false", "512", "push"});
+  CommandLine cmdline(argc, argv, 7, {"num_workers", "graph_path", "num_iters", "enable_nvdimm", "chunk_size", "thread_local_memory_pool_alignment", "run_mode"}, {nullptr, nullptr, nullptr, "false", "512", "4k", "push"});
   int num_workers     = atoi(cmdline.getValue(0));
   string graph_path   = cmdline.getValue(1);
   int num_iters       = atoi(cmdline.getValue(2));
   bool enable_nvdimm = ("true"==string(cmdline.getValue(3))?true:false);
   uint32_t chunk_size = atoi(cmdline.getValue(4));
-  string run_mode     = cmdline.getValue(5);
+  size_t thread_local_memory_pool_alignment = convert_unit(string(cmdline.getValue(5)));
+  string run_mode     = cmdline.getValue(6);
 
   if (rank == 0) {
     cout << "  num_workers = " << num_workers << endl;
@@ -283,14 +289,15 @@ int main(int argc, char* argv[]) {
     cout << "  num_iters = " << num_iters << endl;
     cout << "  enable_nvdimm = " << enable_nvdimm << endl;
     cout << "  chunk_size = " << chunk_size << endl;
+    cout << "  thread_local_memory_pool_alignment = " << thread_local_memory_pool_alignment << endl;
   }
 
   Configuration env_config;
   ExecutionContext ctx(env_config.nvm_off_cache_pool_dir, env_config.nvm_off_cache_pool_dir, env_config.nvm_on_cahce_pool_dir, MPI_COMM_WORLD);
   Driver* driver = new Driver(ctx);
   REGION_BEGIN();
-  GArray<uint32_t>* edges = driver->create_array<uint32_t>(ObjectRequirement::load_from(graph_path + ".edges", false, 0));
-  GArray<uint64_t>* index = driver->create_array<uint64_t>(ObjectRequirement::load_from(graph_path + ".index", false, 0));
+  GArray<uint32_t>* edges = driver->create_array<uint32_t>(ObjectRequirement::load_from(graph_path + ".edges", false, 1));
+  GArray<uint64_t>* index = driver->create_array<uint64_t>(ObjectRequirement::load_from(graph_path + ".index", false, 1));
   DistributedGraph<uint32_t, uint64_t, partition_id_bits> graph(MPI_COMM_WORLD, edges, index);
   REGION_END("Graph Load");
 
@@ -342,14 +349,15 @@ int main(int argc, char* argv[]) {
     #pragma omp parallel
     {
       int tid = omp_get_thread_num();
-      thread_local ThreadLocalMemoryPool tl_mp(2*NUM_BUCKETS*(sizeof(int) + COMBINE_BUFFER_SIZE) + 128);
+      thread_local ThreadLocalMemoryPool tl_mp(2*NUM_BUCKETS*(sizeof(int) + COMBINE_BUFFER_SIZE) + 128, thread_local_memory_pool_alignment);
       char* sendbuf[NUM_BUCKETS];
       tl_mp.reset();
       int* curr_bytes_list = tl_mp.alloc<int>(NUM_BUCKETS);
-      char* combinebuf[NUM_BUCKETS]; // write-combine buffer
-      for (int p=0; p<NUM_BUCKETS; p++) {
-        combinebuf[p] = tl_mp.alloc<char>(COMBINE_BUFFER_SIZE, COMBINE_BUFFER_SIZE); // allocate combinebuf
-      }
+      // char* combinebuf[NUM_BUCKETS]; // write-combine buffer
+      // for (int p=0; p<NUM_BUCKETS; p++) {
+      //   combinebuf[p] = tl_mp.alloc<char>(COMBINE_BUFFER_SIZE, COMBINE_BUFFER_SIZE); // allocate combinebuf
+      // }
+      char* combinebuffer = tl_mp.alloc<char>(COMBINE_BUFFER_SIZE, COMBINE_BUFFER_SIZE); 
       for (int p=0; p<NUM_BUCKETS; p++) {
         curr_bytes_list[p] = 0;
         sendbuf[p] = (char*) vertex_updater.fetch_one();
@@ -360,8 +368,9 @@ int main(int argc, char* argv[]) {
       uint64_t vertices_processed = 0;
       uint64_t edges_processed = 0;
       uint64_t duration = -currentTimeUs();
+      uint64_t wait_duration = 0;
 
-      #pragma omp for schedule(dynamic, chunk_size)
+      #pragma omp for schedule(static, chunk_size)
       for (size_t u=0; u<num_nodes; u++) {
         vertices_processed++;
         uint64_t from  = graph.get_index_from_lid(u);
@@ -374,33 +383,36 @@ int main(int argc, char* argv[]) {
           size_t curr_bytes = curr_bytes_list[vid_part];
 #if 1
           // check to see if a write-back (and corresponding issue) is required
-          if (curr_bytes > 0 && curr_bytes % COMBINE_BUFFER_SIZE == 0) {
+          if (UNLIKELY(curr_bytes > 0 && curr_bytes % COMBINE_BUFFER_SIZE == 0)) {
             // where to write back
             size_t write_back_pos = curr_bytes - COMBINE_BUFFER_SIZE;
             // first write back into memory buffer
-            Memcpy<UpdateRequest>::StreamingStoreUnrolled(&sendbuf[vid_part][write_back_pos], (UpdateRequest*) &combinebuf[vid_part][0] , COMBINE_BUFFER_SIZE/sizeof(UpdateRequest));
+            Memcpy<UpdateRequest>::StreamingStoreUnrolled128Byte(&sendbuf[vid_part][write_back_pos], (UpdateRequest*) &combinebuffer[vid_part*COMBINE_BUFFER_SIZE] , COMBINE_BUFFER_SIZE/sizeof(UpdateRequest));
             // then send out if required
-            if (curr_bytes == MPI_SEND_BUFFER_SIZE) {
+            if (UNLIKELY(curr_bytes == MPI_SEND_BUFFER_SIZE)) {
               // Submit sendbuf[vid_part] of size curr_bytes, and fetch a new buffer
+              wait_duration = -currentTimeUs();
               vertex_updater.submit(vid_part, {sendbuf[vid_part], curr_bytes/sizeof(UpdateRequest)});
               sendbuf[vid_part] = (char*) vertex_updater.fetch_one();
+              wait_duration += currentTimeUs();
               curr_bytes_list[vid_part] = 0; // reset streaming buffer
               curr_bytes = 0;
             }
           }
 #else
           // disable write-back and submit
-          if (curr_bytes == MPI_SEND_BUFFER_SIZE) {
+          if (UNLIKELY(curr_bytes == MPI_SEND_BUFFER_SIZE)) {
             curr_bytes_list[vid_part] = 0; // reset streaming buffer
             curr_bytes = 0;
           }
 #endif
           // write into combine buffer
-          UpdateRequest* combine = (UpdateRequest*) &combinebuf[vid_part][curr_bytes % COMBINE_BUFFER_SIZE];
+          UpdateRequest* combine = (UpdateRequest*) &combinebuffer[vid_part*COMBINE_BUFFER_SIZE + curr_bytes%COMBINE_BUFFER_SIZE];
           combine->y       = vid;
           combine->contrib = contrib;
           curr_bytes_list[vid_part] = curr_bytes + sizeof(UpdateRequest);
-          // _mm_prefetch(&graph._edges[idx+16], _MM_HINT_T1);
+          _mm_prefetch(&graph._edges[idx+128], _MM_HINT_T1);
+          // _mm_prefetch(&graph._index[idx+64], _MM_HINT_T2);
         }
         // _mm_prefetch(&graph._index[u+8], _MM_HINT_T1);
       }
@@ -415,7 +427,7 @@ int main(int argc, char* argv[]) {
               combine_buffer_bytes = COMBINE_BUFFER_SIZE;
             }
             assert(combine_buffer_bytes % sizeof(UpdateRequest) == 0);
-            Memcpy<UpdateRequest>::StreamingStore(&sendbuf[part_id][curr_bytes - combine_buffer_bytes], (UpdateRequest*) &combinebuf[part_id][0], combine_buffer_bytes/sizeof(UpdateRequest));
+            Memcpy<UpdateRequest>::StreamingStore(&sendbuf[part_id][curr_bytes - combine_buffer_bytes], (UpdateRequest*) &combinebuffer[part_id*COMBINE_BUFFER_SIZE], combine_buffer_bytes/sizeof(UpdateRequest));
           }
           vertex_updater.submit(part_id, {sendbuf[part_id], curr_bytes/sizeof(UpdateRequest)});
           sendbuf[part_id] = (char*) vertex_updater.fetch_one();
@@ -427,16 +439,18 @@ int main(int argc, char* argv[]) {
       client_us_per_thread[tid] = duration;
       vertices_processed_per_thread[tid] = vertices_processed;
       edges_processed_per_thread[tid] = edges_processed;
-      printf("[Client Thread %d/%d] Done  edges_processed   %lu\n", g_rank, tid, edges_processed);
+
+      double gpeps = 1e-3 * edges_processed / duration;
+      double active_gpeps = 1e-3 * edges_processed / (duration - wait_duration);
+      printf("[Client Thread %d/%d] Done  edges_processed  %lu  wall_gpeps %lf GPEPS  active_gpeps %lf GPEPS\n", g_rank, tid, edges_processed, gpeps, active_gpeps);
 
       for (int p=0; p<NUM_BUCKETS; p++) {
         vertex_updater.restitution((void*) sendbuf[p]);
       }
     }
+    wallclock_duration += currentTimeUs();
     // wait for completion
     vertex_updater.drain_and_join();
-
-    wallclock_duration += currentTimeUs();
     uint64_t min_edges_processed = accumulate(edges_processed_per_thread, edges_processed_per_thread + num_threads, (uint64_t)-1, [](uint64_t lhs, uint64_t rhs){return min(lhs, rhs);});
     uint64_t sum_edges_processed = accumulate(edges_processed_per_thread, edges_processed_per_thread + num_threads, (uint64_t) 0, [](uint64_t lhs, uint64_t rhs){return lhs+rhs;});
     uint64_t max_edges_processed = accumulate(edges_processed_per_thread, edges_processed_per_thread + num_threads, (uint64_t) 0, [](uint64_t lhs, uint64_t rhs){return max(lhs, rhs);});

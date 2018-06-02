@@ -56,6 +56,29 @@ void* am_memalign(size_t align, size_t size) {
   return ptr;
 }
 
+size_t convert_unit(string number) {
+  size_t len = number.size();
+  int unit = number[len-1];
+  if (isdigit(unit)) {
+    return atoll(number.c_str());
+  } else {
+    switch(unit) {
+      case 'k':
+      case 'K':
+        return 1024LL*atoll(number.c_str());
+      case 'm':
+      case 'M':
+        return 1024LL*1024*atoll(number.c_str());
+      case 'g':
+      case 'G':
+        return 1024LL*1024*atoll(number.c_str());
+      default:
+        printf("Wrong format for number: %s\n", number.c_str());
+        assert(false);
+    }
+  }
+}
+
 uint64_t currentAbsoluteTimestamp() {
   unsigned hi, lo;
   asm volatile ("CPUID\n\t"
