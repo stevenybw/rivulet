@@ -187,6 +187,13 @@ namespace memory {
   void free(void* ptr) {
     ::free(ptr);
   }
+
+  void* numa_alloc_onnode(size_t bytes, int node_id) {
+    return ::numa_alloc_onnode(bytes, node_id);
+  }
+  void  numa_free(void* start, size_t size) {
+    ::numa_free(start, size);
+  }
 };
 
 std::mutex mu_mpi_routine;

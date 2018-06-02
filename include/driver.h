@@ -21,10 +21,10 @@ using namespace std;
 /*! \brief Load configuration from environment variable
  */
 struct Configuration {
-  constexpr static char* NVM_OFF_CACHE_POOL_DIR = "NVM_OFF_CACHE_POOL_DIR";
-  constexpr static char* NVM_OFF_CACHE_POOL_SIZE = "NVM_OFF_CACHE_POOL_SIZE";
-  constexpr static char* NVM_ON_CACHE_POOL_DIR = "NVM_ON_CACHE_POOL_DIR";
-  constexpr static char* NVM_ON_CACHE_POOL_SIZE = "NVM_ON_CACHE_POOL_SIZE";
+  constexpr static const char* NVM_OFF_CACHE_POOL_DIR = "NVM_OFF_CACHE_POOL_DIR";
+  constexpr static const char* NVM_OFF_CACHE_POOL_SIZE = "NVM_OFF_CACHE_POOL_SIZE";
+  constexpr static const char* NVM_ON_CACHE_POOL_DIR = "NVM_ON_CACHE_POOL_DIR";
+  constexpr static const char* NVM_ON_CACHE_POOL_SIZE = "NVM_ON_CACHE_POOL_SIZE";
 
   string nvm_off_cache_pool_dir;
   size_t nvm_off_cache_pool_size;
@@ -140,6 +140,10 @@ struct ObjectRequirement
   Object::StorageLevel _storage_level;
   size_t               _init_capacity;
 
+  // attribute valid for load
+  bool                 _enable_mmap = false;
+  int                  _numa_bind = -1;
+
   RequirementType req_type() { return _req_type; }
   string fullname() { return _fullname; }
   ObjectType obj_type() { return _obj_type; }
@@ -148,6 +152,8 @@ struct ObjectRequirement
   bool is_type_create() { return _req_type == TYPE_CREATE; }
   bool is_transient() { return _obj_type == OBJECT_TRANSIENT; } /**< Whether the required object is transient */
   bool is_in_memory() { return _storage_level == Object::MEMORY; } /**< Whether the required object is in DRAM */
+  bool enable_mmap() { return _enable_mmap; }
+  int  numa_bind() { return _numa_bind; }
 
   size_t local_capacity() { return _init_capacity; }
   void set_local_capacity(size_t capacity) { _init_capacity = capacity; }
@@ -155,13 +161,18 @@ struct ObjectRequirement
   /*! \brief Load the object from given fullname
    *
    *  For now, we set the constraint that loaded object must be read only for crash consistency.
+   *     1. fullname: the path to be loaded from
+   *     2. enable_mmap: set true if avoid copy and copy into memory
+   *     3. numa_bind: if mmap is set to false, this controls if to bind to a numa node. -1 represent not bind.
    */
-  static ObjectRequirement load_from(string fullname) {
+  static ObjectRequirement load_from(string fullname, bool enable_mmap=true, int numa_bind=-1) {
     ObjectRequirement obj_req;
     obj_req._req_type  = TYPE_LOAD;
     obj_req._fullname = fullname;
     obj_req._obj_type  = OBJECT_TRANSIENT;
     obj_req._capability= CAPABILITY_READONLY;
+    obj_req._enable_mmap = enable_mmap;
+    obj_req._numa_bind   = numa_bind;
     return obj_req;
   }
 
@@ -312,13 +323,13 @@ struct Driver
       }
       size_t local_capacity = obj_req.local_capacity();
       if (obj_req.is_transient() && obj_req.is_in_memory()) {
-        PRINTF("%d> Create transient DRAM array (bytes = %zu)\n", rank, local_capacity);
+        printf("%d> Create transient DRAM array (bytes = %zu)\n", rank, local_capacity);
         void* local_data = malloc(local_capacity);
         Object* obj = new Object([](){;}, [local_data](){free(local_data);}, [](void* ptr, size_t new_bytes){return realloc(ptr, new_bytes);});
         obj->_comm = ctx.get_comm();
         obj->_is_persist = false;
         obj->_fullname = "<memory>";
-        obj->_local_data = malloc(local_capacity);
+        obj->_local_data = local_data;
         obj->_local_capacity = local_capacity;
         GArray<T>* garr = new GArray<T>(obj);
         garr->resize(new_size);
@@ -365,17 +376,50 @@ struct Driver
       string fullname = filename_append_postfix(obj_req.fullname(), rank, nprocs);
       MappedFile file;
       file.open(fullname.c_str(), FILE_MODE_READ_ONLY, ACCESS_PATTERN_NORMAL);
-      // resize not allowed here
-      Object* obj = new Object([file]() mutable {file.msync();}, [file]() mutable {file.close();}, [file](void* ptr, size_t new_bytes) mutable  ->void* {assert(false); return NULL; });
-      obj->_comm  = ctx.get_comm();
-      obj->_is_persist = true;
-      obj->_fullname   = fullname;
-      obj->_local_data = file.get_addr();
-      obj->_local_capacity = file.get_bytes(); 
-      assert(file.get_bytes() % sizeof(T) == 0);
-      GArray<T>* garr = new GArray<T>(obj);
-      garr->resize(file.get_bytes() / sizeof(T));
-      return garr;
+      if (obj_req.enable_mmap()) {
+        // resize not allowed here
+        Object* obj = new Object([file]() mutable {file.msync();}, [file]() mutable {file.close();}, [file](void* ptr, size_t new_bytes) mutable  ->void* {assert(false); return NULL; });
+        obj->_comm  = ctx.get_comm();
+        obj->_is_persist = true;
+        obj->_fullname   = fullname;
+        obj->_local_data = file.get_addr();
+        obj->_local_capacity = file.get_bytes(); 
+        assert(file.get_bytes() % sizeof(T) == 0);
+        GArray<T>* garr = new GArray<T>(obj);
+        garr->resize(file.get_bytes() / sizeof(T));
+        return garr;
+      } else {
+        // allocate memory buffer
+        const void*  file_data      = file.get_addr();
+        size_t local_capacity = file.get_bytes();
+        void*  local_data = NULL;
+        int    numa_bind  = obj_req.numa_bind();
+        if (numa_bind < 0) {
+          printf("%d> Load file %s into transient DRAM array (bytes = %zu) without bind\n", rank, fullname.c_str(), local_capacity);
+          local_data = malloc(local_capacity);
+        } else {
+          printf("%d> Load file %s into transient DRAM array (bytes = %zu) bind to socket %d\n", rank, fullname.c_str(), local_capacity, numa_bind);
+          local_data = memory::numa_alloc_onnode(local_capacity, numa_bind);
+          assert(local_data);
+        }
+        parallel_memcpy(local_data, file_data, local_capacity);
+        Object* obj = new Object([](){;}, [local_data, local_capacity, numa_bind](){
+          if (numa_bind < 0) {
+            free(local_data);
+          } else {
+            memory::numa_free(local_data, local_capacity);
+          }
+        }, [](void* ptr, size_t new_bytes){ assert(false); return nullptr; });
+        obj->_comm       = ctx.get_comm();
+        obj->_is_persist = false;
+        obj->_fullname   = string("<memory>@") + fullname;
+        obj->_local_data = local_data;
+        obj->_local_capacity = local_capacity;
+        assert(local_capacity % sizeof(T) == 0);
+        GArray<T>* garr = new GArray<T>(obj);
+        garr->resize(local_capacity / sizeof(T));
+        return garr;
+      }
     } else {
       assert(false);
     }

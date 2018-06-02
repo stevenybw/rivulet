@@ -23,6 +23,15 @@ using namespace std;
 #define ACCESS_PATTERN_RANDOM 1
 #define ACCESS_PATTERN_NORMAL 2
 
+/*! \brief Memory region backed by a file
+ *
+ *
+ *  METHODS
+ *    1. create(path, bytes):  create a file at path with specific bytes (overritten if existed)
+ *    2. open(path, mode, access_pattern, pre_load)
+ *          create a file at path, mode determine r/w, access_pattern determines s/r
+ *       
+ */
 struct MappedFile {
   bool   _opened;
   string _path;
@@ -34,28 +43,7 @@ struct MappedFile {
   size_t _bytes;
   void*  _addr;
 
-  size_t get_bytes() { return _bytes; }
-  void* get_addr() { return _addr; }
-
-  bool create(const char* path, size_t bytes) {
-    if (access(path, F_OK) != -1) {
-      printf("WARNING: Path to be created %s exists, which would be overwritten\n", path);
-      ::unlink(path);
-    }
-    mode_t mode = S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
-    int fd = ::open(path, O_RDWR | O_CREAT, mode);
-    if (fd < 0) {
-      cout << "cannot open file " << path;
-      perror("file open failed");
-      assert(false);
-    }
-    if (ftruncate(fd, bytes) < 0) {
-      perror("ftruncate");
-      assert(false);
-    }
-    ::close(fd);
-    return true;
-  }
+  enum HugePageSupport { HUGETLB_NORMAL=0, HUGETLB_2MB, HUGETLB_1GB };
 
   void* _mmap(int access_pattern, size_t bytes, int mmap_prot, int mmap_flags, int fd) {
     if (bytes == 0) {
@@ -85,7 +73,31 @@ struct MappedFile {
     }
   }
 
-  bool open(const char* path, int mode, int access_pattern, bool pre_load=false) {
+  size_t get_bytes() { return _bytes; } /**< Get the size in bytes of the file */
+  void* get_addr() { return _addr; } /**< Get the base address of the file */
+  void* get_data() { return _addr; } // the same
+
+  bool create(const char* path, size_t bytes) {
+    if (access(path, F_OK) != -1) {
+      printf("WARNING: Path to be created %s exists, which would be overwritten\n", path);
+      ::unlink(path);
+    }
+    mode_t mode = S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
+    int fd = ::open(path, O_RDWR | O_CREAT, mode);
+    if (fd < 0) {
+      cout << "cannot open file " << path;
+      perror("file open failed");
+      assert(false);
+    }
+    if (ftruncate(fd, bytes) < 0) {
+      perror("ftruncate");
+      assert(false);
+    }
+    ::close(fd);
+    return true;
+  }
+
+  bool open(const char* path, int mode, int access_pattern, HugePageSupport huge_page_support=HUGETLB_NORMAL, bool pre_load=false) {
     int open_flags;
     int mmap_flags;
     int mmap_prot;
@@ -111,6 +123,7 @@ struct MappedFile {
     int fd = ::open(path, open_flags);
     if (fd < 0) {
       cout << "cannot open file " << path << endl;
+      perror("cannot open file");
       assert(false);
     }
     size_t bytes = lseek(fd, 0, SEEK_END);

@@ -94,6 +94,9 @@ namespace memory {
    */
   void* allocate_shared_rw(size_t bytes);
   void free(void* ptr);
+
+  void* numa_alloc_onnode(size_t bytes, int node_id);
+  void  numa_free(void* start, size_t bytes);
 };
 
 extern std::mutex mu_mpi_routine;
@@ -136,10 +139,10 @@ struct CommandLine
   int     argc;
   char**  argv;
   int     num_positional;
-  std::vector<char*>  value_names;
-  std::vector<char*>  default_values;
+  std::vector<const char*>  value_names;
+  std::vector<const char*>  default_values;
 
-  char* getValue(int index) {
+  const char* getValue(int index) {
     assert(index < num_positional);
     if (index+1 < argc) {
       return argv[index+1];
@@ -180,7 +183,7 @@ struct CommandLine
    *         which must be an array equal to num_positional, and nullptr if it is required.
    *
    */
-  CommandLine(int argc, char* argv[], int num_positional, std::initializer_list<char*> value_names, std::initializer_list<char*> default_values) : argc(argc), argv(argv), num_positional(num_positional), value_names(value_names), default_values(default_values) {
+  CommandLine(int argc, char* argv[], int num_positional, std::initializer_list<const char*> value_names, std::initializer_list<const char*> default_values) : argc(argc), argv(argv), num_positional(num_positional), value_names(value_names), default_values(default_values) {
     if (contains("-help") || contains("--help")) {
       printUsage();
       exit(1);

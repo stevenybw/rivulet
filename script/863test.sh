@@ -1,3 +1,5 @@
+# 测试之前请确保/mnt/pmem0以DAX模式，并且/mnt/pmem1不以DAX模式
+
 SHM_PREFIX=/mnt/shm/user863
 export NVM_OFF_CACHE_POOL_DIR=/mnt/pmem0/pool
 export NVM_OFF_CACHE_POOL_SIZE=103079215104

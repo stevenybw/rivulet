@@ -29,12 +29,13 @@
 
 #include "driver.h"
 #include "graph_context.h"
+#include "mmap_allocator.h"
 
 using namespace std;
 
 constexpr size_t MPI_SEND_BUFFER_SIZE = 1*1024*1024;
 constexpr size_t COMBINE_BUFFER_SIZE  = 128;
-constexpr size_t NUM_BUCKETS          = 512;
+constexpr size_t NUM_BUCKETS          = 1024;
 
 using UpdateRequest = GeneralUpdateRequest<uint32_t, double>;
 using LockGuard = std::lock_guard<std::mutex>;
@@ -124,6 +125,7 @@ struct VertexUpdater
   using Thread = std::thread;
   using ThreadList = std::vector<std::thread>;
 
+  MmapMemoryPool* mmap_pool = NULL;
   double* next_val = NULL;
 
   int num_workers;
@@ -140,12 +142,23 @@ struct VertexUpdater
   std::condition_variable cond_num_worker_done;
   volatile int num_worker_done = 0;
 
-  VertexUpdater(int num_workers, int num_producers) : num_workers(num_workers), num_producers(num_producers) {
+  /*! \brief Pass driver to create in nvdimm pool
+   */
+  VertexUpdater(int num_workers, int num_producers, bool enable_nvdimm=false) : num_workers(num_workers), num_producers(num_producers) {
     num_buffers = (num_workers + num_producers) * NUM_BUCKETS; // num buffers in buffer pool
     workers_requests = new ConcurrentWRQueue[num_workers];
     workers.resize(num_workers);
+    if (enable_nvdimm) {
+      Configuration env_config;
+      mmap_pool = new MmapMemoryPool(env_config.nvm_off_cache_pool_dir + "/temp.file", num_buffers * sizeof(BufferFragment));
+    }
     for(int i=0; i<num_buffers; i++) {
-      void* data = memalign(4096, sizeof(BufferFragment));
+      void* data = NULL;
+      if (enable_nvdimm) {
+        data = mmap_pool->alloc<char>(sizeof(BufferFragment), 4096);
+      } else {
+        data = memalign(4096, sizeof(BufferFragment));
+      }
       uint64_t size = 0;
       responds.push({(UpdateRequest*)data, size});
     }
@@ -212,6 +225,8 @@ struct VertexUpdater
   }
 
   void _worker(int worker_id) {
+    uint64_t edges_processed = 0;
+    uint64_t duration = -currentTimeUs();
     try {
       assert(worker_id>=0 && worker_id < num_workers);
       ConcurrentWRQueue& requests = workers_requests[worker_id];
@@ -219,6 +234,7 @@ struct VertexUpdater
         WorkerRequest req = requests.pull();
         UpdateRequest* reqs = (UpdateRequest*) req.data;
         uint64_t       size = req.size;
+        edges_processed += size;
         for(uint64_t i=0; i<size; i++) {
           uint32_t y = reqs[i].y;
           double contrib = reqs[i].contrib;
@@ -235,7 +251,8 @@ struct VertexUpdater
       if (curr_num_worker_done == num_workers) {
         cond_num_worker_done.notify_one(); // only one thread may be allowed to call drain_and_join
       }
-      printf("worker %d closed\n", worker_id);
+      duration += currentTimeUs();
+      printf("[Worker Thread %d] Done edges_processed  %lu\n", worker_id, edges_processed);
       return;
     }
   }
@@ -252,17 +269,19 @@ int main(int argc, char* argv[]) {
   g_rank = rank;
   g_nprocs = nprocs;
 
-  CommandLine cmdline(argc, argv, 5, {"num_workers", "graph_path", "num_iters", "chunk_size", "run_mode"}, {nullptr, nullptr, nullptr, "512", "push"});
+  CommandLine cmdline(argc, argv, 6, {"num_workers", "graph_path", "num_iters", "enable_nvdimm", "chunk_size", "run_mode"}, {nullptr, nullptr, nullptr, "false", "512", "push"});
   int num_workers     = atoi(cmdline.getValue(0));
   string graph_path   = cmdline.getValue(1);
   int num_iters       = atoi(cmdline.getValue(2));
-  uint32_t chunk_size = atoi(cmdline.getValue(3));
-  string run_mode     = cmdline.getValue(4);
+  bool enable_nvdimm = ("true"==string(cmdline.getValue(3))?true:false);
+  uint32_t chunk_size = atoi(cmdline.getValue(4));
+  string run_mode     = cmdline.getValue(5);
 
   if (rank == 0) {
     cout << "  num_workers = " << num_workers << endl;
     cout << "  graph_path = " << graph_path << endl;
     cout << "  num_iters = " << num_iters << endl;
+    cout << "  enable_nvdimm = " << enable_nvdimm << endl;
     cout << "  chunk_size = " << chunk_size << endl;
   }
 
@@ -270,8 +289,8 @@ int main(int argc, char* argv[]) {
   ExecutionContext ctx(env_config.nvm_off_cache_pool_dir, env_config.nvm_off_cache_pool_dir, env_config.nvm_on_cahce_pool_dir, MPI_COMM_WORLD);
   Driver* driver = new Driver(ctx);
   REGION_BEGIN();
-  GArray<uint32_t>* edges = driver->create_array<uint32_t>(ObjectRequirement::load_from(graph_path + ".edges"));
-  GArray<uint64_t>* index = driver->create_array<uint64_t>(ObjectRequirement::load_from(graph_path + ".index"));
+  GArray<uint32_t>* edges = driver->create_array<uint32_t>(ObjectRequirement::load_from(graph_path + ".edges", false, 0));
+  GArray<uint64_t>* index = driver->create_array<uint64_t>(ObjectRequirement::load_from(graph_path + ".index", false, 0));
   DistributedGraph<uint32_t, uint64_t, partition_id_bits> graph(MPI_COMM_WORLD, edges, index);
   REGION_END("Graph Load");
 
@@ -303,7 +322,7 @@ int main(int argc, char* argv[]) {
 
   double sum_duration = 0.0;
 
-  VertexUpdater vertex_updater(num_workers, num_threads);
+  VertexUpdater vertex_updater(num_workers, num_threads, enable_nvdimm);
   vertex_updater.set_next_val(next_val);
 
   for (int iter=0; iter<num_iters; iter++) {
@@ -353,6 +372,7 @@ int main(int argc, char* argv[]) {
           uint32_t vid = graph.get_edge_from_index(idx);
           int vid_part = (vid >> 5) % NUM_BUCKETS; // the partition this vertex belongs to
           size_t curr_bytes = curr_bytes_list[vid_part];
+#if 1
           // check to see if a write-back (and corresponding issue) is required
           if (curr_bytes > 0 && curr_bytes % COMBINE_BUFFER_SIZE == 0) {
             // where to write back
@@ -367,14 +387,22 @@ int main(int argc, char* argv[]) {
               curr_bytes_list[vid_part] = 0; // reset streaming buffer
               curr_bytes = 0;
             }
-            // Memcpy<UpdateRequest>::PrefetchNTA(req_ptr+1);
           }
+#else
+          // disable write-back and submit
+          if (curr_bytes == MPI_SEND_BUFFER_SIZE) {
+            curr_bytes_list[vid_part] = 0; // reset streaming buffer
+            curr_bytes = 0;
+          }
+#endif
           // write into combine buffer
           UpdateRequest* combine = (UpdateRequest*) &combinebuf[vid_part][curr_bytes % COMBINE_BUFFER_SIZE];
           combine->y       = vid;
           combine->contrib = contrib;
           curr_bytes_list[vid_part] = curr_bytes + sizeof(UpdateRequest);
+          // _mm_prefetch(&graph._edges[idx+16], _MM_HINT_T1);
         }
+        // _mm_prefetch(&graph._index[u+8], _MM_HINT_T1);
       }
 
       // flush buffer
@@ -415,9 +443,10 @@ int main(int argc, char* argv[]) {
     double   avg_edges_processed = sum_edges_processed / num_threads;
     uint64_t sum_vertices_processed = accumulate(vertices_processed_per_thread, vertices_processed_per_thread + num_threads, (uint64_t) 0, [](uint64_t lhs, uint64_t rhs){return lhs+rhs;});
     uint64_t total_memory_access = (sizeof(UpdateRequest) + sizeof(uint32_t)) * sum_edges_processed + sizeof(double) * sum_vertices_processed;
+    double   gbps  = 1e-3 * total_memory_access/wallclock_duration;
     double   gpeps = 1e-3 * sum_edges_processed/wallclock_duration;
-    printf("%10s %10s %10s %10s %10s %10s\n", "", "min_edges", "avg_edges", "max_edges", "GB/s", "GPEPS");
-    printf("%10s %10lu %10lf %10lu %10lf %10lf\n", "Client", min_edges_processed, avg_edges_processed, max_edges_processed, 1.0e-3 * total_memory_access/wallclock_duration, gpeps);
+    printf("%10s %10s %10s %10s %10s %10s\n", "", "min_edges", "avg_edges", "max_edges", "GPEPS", "");
+    printf("%10s %10lu %10lf %10lu %10lf %10s\n", "Client", min_edges_processed, avg_edges_processed, max_edges_processed, gpeps, "");
     double sum = 0.0;
     for (size_t i=0; i<num_nodes; i++) {
       sum += next_val[i];
