@@ -477,7 +477,7 @@ int main(int argc, char* argv[]) {
           double contrib = src[u];
           for (uint64_t idx=from; idx<to; idx++) {
             uint32_t vid = graph.get_edge_from_index(idx);
-            int vid_part = (vid >> 5) % NUM_BUCKETS; // the partition this vertex belongs to
+            int vid_part = vid >> 17; // the partition this vertex belongs to
             size_t curr_bytes = curr_bytes_list[vid_part];
 #if 1
             // check to see if a write-back (and corresponding issue) is required
