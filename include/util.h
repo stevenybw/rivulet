@@ -39,7 +39,7 @@ extern int g_nprocs;
 const uint64_t MMIX_CONSTANT_MULTIPLIER = 6364136223846793005LL;
 const uint64_t MMIX_CONSTANT_INCREMENT  = 1442695040888963407LL;
 
-#define MPI_DEBUG
+// #define MPI_DEBUG
 
 #ifdef MPI_DEBUG
 #define assert(COND) do{if(!(COND)) {printf("ASSERTION VIOLATED, PROCESS pid = %d PAUSED\n", getpid()); while(1);}}while(0)

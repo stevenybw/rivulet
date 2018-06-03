@@ -219,7 +219,7 @@ struct VertexUpdater
       workers[i].join();
     }
     if (responds.size() != num_buffers) {
-      printf("Unexpected buffer size: expected %d   current %d\n", num_buffers, responds.size());
+      printf("Unexpected buffer size: expected %d   current %zu\n", num_buffers, responds.size());
       assert(false);
     }
   }
@@ -231,6 +231,7 @@ struct VertexUpdater
     try {
       assert(worker_id>=0 && worker_id < num_workers);
       ConcurrentWRQueue& requests = workers_requests[worker_id];
+      double temp = 0.0;
       while (true) {
         WorkerRequest req = requests.pull();
         UpdateRequest* reqs = (UpdateRequest*) req.data;
@@ -241,12 +242,13 @@ struct VertexUpdater
           uint32_t y = reqs[i].y;
           double contrib = reqs[i].contrib;
           next_val[y] += contrib;
-          _mm_prefetch(&reqs[i+64], _MM_HINT_T1);
+          _mm_prefetch(&reqs[i+256], _MM_HINT_T1); // software prefetch greatly improves the performance
         }
         active_duration += currentTimeUs();
         req.size = 0;
         responds.push(req);
       }
+      printf("%lf\n", temp);
     } catch (ConcurrentWRQueue::closed_error ex) {
       int curr_num_worker_done = 0;
       UniqueLock lk(mu_num_worker_done);
@@ -262,6 +264,76 @@ struct VertexUpdater
     }
   }
 };
+
+struct alignas(64) WorkAssignment {
+  struct Result {
+    uint64_t from_pos;
+    uint64_t to_pos;
+
+    bool empty() { return from_pos == to_pos; }
+    uint64_t from() { return from_pos; }
+    uint64_t to() { return to_pos; }
+  };
+  uint64_t from_pos;
+  uint64_t to_pos;
+  volatile uint64_t current_pos;
+
+  void reset() {
+    current_pos = from_pos;
+  }
+
+  Result fetch(uint64_t num_elem) {
+    uint64_t from = __sync_fetch_and_add(&current_pos, num_elem);
+    if (from >= to_pos) {
+      return {to_pos, to_pos};
+    }
+    uint64_t to = from + num_elem;
+    if (to >= to_pos) {
+      to = to_pos;
+    }
+    return {from, to};
+  }
+};
+
+
+/*! \brief Assign vertex in chunk to producers
+ *
+ *  Try to make each chunk equal
+ */
+void assign(uint64_t num_vertex, const uint64_t* index, int num_producers, WorkAssignment* assignments)
+{
+  assert(sizeof(WorkAssignment) == 64);
+  uint64_t total_num_edges = index[num_vertex];
+  uint64_t edges_per_chunk = total_num_edges / num_producers;
+  uint64_t last_vid = 0;
+  for(int i=0; i<num_producers-1; i++) {
+    uint64_t curr_vid = last_vid;
+    uint64_t expect_edge_sum = (i+1) * edges_per_chunk;
+    while(curr_vid<num_vertex && index[curr_vid]<expect_edge_sum) {
+      curr_vid++;
+    }
+    assignments[i].from_pos = last_vid;
+    assignments[i].to_pos = curr_vid;
+    assignments[i].current_pos = last_vid;
+    last_vid = curr_vid;
+  }
+  assignments[num_producers-1].from_pos = last_vid;
+  assignments[num_producers-1].to_pos = num_vertex;
+  assignments[num_producers-1].current_pos = last_vid;
+}
+
+void assign_equal_vertex(uint64_t num_vertex, const uint64_t* index, int num_producers, WorkAssignment* assignments)
+{
+  uint64_t chunk_size = num_vertex / num_producers;
+  for(int i=0; i<num_producers-1; i++) {
+    assignments[i].from_pos = i*chunk_size;
+    assignments[i].to_pos = (i+1)*chunk_size;
+    assignments[i].current_pos = i*chunk_size;
+  }
+  assignments[num_producers-1].from_pos = (num_producers-1)*chunk_size;
+  assignments[num_producers-1].to_pos = num_vertex;
+  assignments[num_producers-1].current_pos = (num_producers-1)*chunk_size;
+}
 
 int main(int argc, char* argv[]) {
   uint64_t duration;
@@ -317,6 +389,19 @@ int main(int argc, char* argv[]) {
   }
 
   size_t num_nodes = graph.local_num_nodes();
+  WorkAssignment* assignments = (WorkAssignment*) memalign(64, num_threads * sizeof(WorkAssignment));
+  assign(num_nodes, index->data(), num_threads, assignments);
+  {
+    uint64_t sum_nodes = 0;
+    for(int i=0; i<num_threads; i++) {
+      uint64_t from_pos = assignments[i].from_pos;
+      uint64_t to_pos = assignments[i].to_pos;
+      printf("thread %d   from_vid %lu   to_vid %lu  num_edges %lu\n", i, from_pos, to_pos, index->data()[to_pos] - index->data()[from_pos]);
+      sum_nodes += to_pos - from_pos;
+    }
+    assert(sum_nodes == num_nodes);
+  }
+
   LINES;
   double* src = (double*) malloc_pinned(num_nodes * sizeof(double));
   double* next_val = (double*) malloc_pinned(num_nodes * sizeof(double));
@@ -333,6 +418,9 @@ int main(int argc, char* argv[]) {
   vertex_updater.set_next_val(next_val);
 
   for (int iter=0; iter<num_iters; iter++) {
+    for(int i=0; i<num_threads; i++) {
+      assignments[i].reset();
+    }
     vertex_updater.start();
 
     #pragma omp parallel for
@@ -370,53 +458,67 @@ int main(int argc, char* argv[]) {
       uint64_t duration = -currentTimeUs();
       uint64_t wait_duration = 0;
 
-      #pragma omp for schedule(static, chunk_size)
-      for (size_t u=0; u<num_nodes; u++) {
-        vertices_processed++;
-        uint64_t from  = graph.get_index_from_lid(u);
-        uint64_t to    = graph.get_index_from_lid(u+1);
-        edges_processed += (to-from);
-        double contrib = src[u];
-        for (uint64_t idx=from; idx<to; idx++) {
-          uint32_t vid = graph.get_edge_from_index(idx);
-          int vid_part = (vid >> 5) % NUM_BUCKETS; // the partition this vertex belongs to
-          size_t curr_bytes = curr_bytes_list[vid_part];
+      int curr_id = tid;
+      int num_visited = 0;
+      while (num_visited < num_threads) {
+        auto work = assignments[curr_id].fetch(chunk_size);
+        if (work.empty()) {
+          curr_id = (curr_id + 1) % num_threads;
+          num_visited++;
+          continue;
+        }
+        size_t from_vid = work.from();
+        size_t to_vid   = work.to();
+        for (size_t u=from_vid; u<to_vid; u++) {
+          vertices_processed++;
+          uint64_t from  = graph.get_index_from_lid(u);
+          uint64_t to    = graph.get_index_from_lid(u+1);
+          edges_processed += (to-from);
+          double contrib = src[u];
+          for (uint64_t idx=from; idx<to; idx++) {
+            uint32_t vid = graph.get_edge_from_index(idx);
+            int vid_part = (vid >> 5) % NUM_BUCKETS; // the partition this vertex belongs to
+            size_t curr_bytes = curr_bytes_list[vid_part];
 #if 1
-          // check to see if a write-back (and corresponding issue) is required
-          if (UNLIKELY(curr_bytes > 0 && curr_bytes % COMBINE_BUFFER_SIZE == 0)) {
-            // where to write back
-            size_t write_back_pos = curr_bytes - COMBINE_BUFFER_SIZE;
-            // first write back into memory buffer
-            Memcpy<UpdateRequest>::StreamingStoreUnrolled128Byte(&sendbuf[vid_part][write_back_pos], (UpdateRequest*) &combinebuffer[vid_part*COMBINE_BUFFER_SIZE] , COMBINE_BUFFER_SIZE/sizeof(UpdateRequest));
-            // then send out if required
+            // check to see if a write-back (and corresponding issue) is required
+            if (UNLIKELY(curr_bytes > 0 && curr_bytes % COMBINE_BUFFER_SIZE == 0)) {
+              // where to write back
+              size_t write_back_pos = curr_bytes - COMBINE_BUFFER_SIZE;
+              // first write back into memory buffer
+              Memcpy<UpdateRequest>::StreamingStoreUnrolled128Byte(&sendbuf[vid_part][write_back_pos], (UpdateRequest*) &combinebuffer[vid_part*COMBINE_BUFFER_SIZE] , COMBINE_BUFFER_SIZE/sizeof(UpdateRequest));
+              // then send out if required
+              if (UNLIKELY(curr_bytes == MPI_SEND_BUFFER_SIZE)) {
+                // Submit sendbuf[vid_part] of size curr_bytes, and fetch a new buffer
+
+                wait_duration = -currentTimeUs();
+                vertex_updater.submit(vid_part, {sendbuf[vid_part], curr_bytes/sizeof(UpdateRequest)});
+                sendbuf[vid_part] = (char*) vertex_updater.fetch_one();
+                wait_duration += currentTimeUs();
+
+                curr_bytes_list[vid_part] = 0; // reset streaming buffer
+                curr_bytes = 0;
+              }
+            }
+#else
+            // disable write-back and submit
             if (UNLIKELY(curr_bytes == MPI_SEND_BUFFER_SIZE)) {
-              // Submit sendbuf[vid_part] of size curr_bytes, and fetch a new buffer
-              wait_duration = -currentTimeUs();
-              vertex_updater.submit(vid_part, {sendbuf[vid_part], curr_bytes/sizeof(UpdateRequest)});
-              sendbuf[vid_part] = (char*) vertex_updater.fetch_one();
-              wait_duration += currentTimeUs();
               curr_bytes_list[vid_part] = 0; // reset streaming buffer
               curr_bytes = 0;
             }
-          }
-#else
-          // disable write-back and submit
-          if (UNLIKELY(curr_bytes == MPI_SEND_BUFFER_SIZE)) {
-            curr_bytes_list[vid_part] = 0; // reset streaming buffer
-            curr_bytes = 0;
-          }
 #endif
-          // write into combine buffer
-          UpdateRequest* combine = (UpdateRequest*) &combinebuffer[vid_part*COMBINE_BUFFER_SIZE + curr_bytes%COMBINE_BUFFER_SIZE];
-          combine->y       = vid;
-          combine->contrib = contrib;
-          curr_bytes_list[vid_part] = curr_bytes + sizeof(UpdateRequest);
-          _mm_prefetch(&graph._edges[idx+128], _MM_HINT_T1);
-          // _mm_prefetch(&graph._index[idx+64], _MM_HINT_T2);
+            // write into combine buffer
+            UpdateRequest* combine = (UpdateRequest*) &combinebuffer[vid_part*COMBINE_BUFFER_SIZE + curr_bytes%COMBINE_BUFFER_SIZE];
+            combine->y       = vid;
+            combine->contrib = contrib;
+            curr_bytes_list[vid_part] = curr_bytes + sizeof(UpdateRequest);
+            _mm_prefetch(&graph._edges[idx+128], _MM_HINT_T1);
+            // _mm_prefetch(&graph._index[idx+64], _MM_HINT_T2);
+          }
+          // _mm_prefetch(&graph._index[u+8], _MM_HINT_T1);
         }
-        // _mm_prefetch(&graph._index[u+8], _MM_HINT_T1);
       }
 
+#if 1
       // flush buffer
       for (int part_id=0; part_id<NUM_BUCKETS; part_id++) {
         size_t curr_bytes = curr_bytes_list[part_id];
@@ -434,6 +536,7 @@ int main(int argc, char* argv[]) {
           curr_bytes_list[part_id] = 0;
         }
       }
+#endif
 
       duration += currentTimeUs();
       client_us_per_thread[tid] = duration;
