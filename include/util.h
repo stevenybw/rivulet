@@ -476,6 +476,7 @@ struct ThreadLocalMemoryPool
   char*  data;
 
   ThreadLocalMemoryPool(size_t capacity, size_t alignment=4096) : pos(0), capacity(capacity), alignment(alignment) {
+    printf("Init Thread Local Memory Pool (Allocate %zu bytes\n)", capacity);
     data = (char*) memalign(alignment, capacity);
     assert(data != nullptr);
   }

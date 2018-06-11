@@ -81,9 +81,15 @@ struct Memcpy<GeneralUpdateRequest<uint32_t, double>>
     __m256d* dest = (__m256d*) destptr;
     __m256d* rhs  = (__m256d*) rhsptr;
     int num_packet = num_element/2;
-    for (int i=0; i<num_packet; i+=2) {
-      _mm256_stream_pd((double*)&dest[0], rhs[0]);
-      _mm256_stream_pd((double*)&dest[1], rhs[1]);
+    for (int i=0; i<num_packet; i+=4) {
+      __m256d rhs_0 = _mm256_load_pd((const double*) &rhs[0]);
+      __m256d rhs_1 = _mm256_load_pd((const double*) &rhs[1]);
+      __m256d rhs_2 = _mm256_load_pd((const double*) &rhs[2]);
+      __m256d rhs_3 = _mm256_load_pd((const double*) &rhs[3]);
+      _mm256_stream_pd((double*)&dest[0], rhs_0);
+      _mm256_stream_pd((double*)&dest[1], rhs_1);
+      _mm256_stream_pd((double*)&dest[2], rhs_2);
+      _mm256_stream_pd((double*)&dest[3], rhs_3);
     }
   }
 

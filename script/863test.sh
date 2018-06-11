@@ -28,6 +28,10 @@ function clear_result() {
   clush -w ${HOSTS} rm ${NVM_ON_CACHE_POOL_DIR-"X"}/*;
 }
 
+echo "清除"
+rm /mnt/pmem0/*
+ssh phoenix01 "rm /mnt/pmem0/*"
+
 echo "6.1.1.1 数据对象模型跨节点"
 
 echo "一个进程graph_preprocess"
@@ -69,11 +73,11 @@ mpirun --bind-to socket -npersocket 1 --hostfile hostfile.txt -- ./bfs_distribut
 
 echo "Ligra验证（切换到平台bic05）"
 cd /home/ybw/OpenSourceCode/ligra/inputs/twitter-2010
-../../apps/PageRank -b twitter-2010
+../../apps/PageRankA -b twitter-2010
 ../../apps/BFS -b twitter-2010
 
 cd /home/ybw/OpenSourceCode/ligra/inputs/uk-2007-05
-../../apps/PageRank -b uk-2007-05
+../../apps/PageRankA -b uk-2007-05
 ../../apps/BFS -b uk-2007-05
 
 
@@ -140,8 +144,10 @@ mpirun --bind-to none -npernode 1 --hostfile hostfile.txt -- ./script/copy_files
 
 
 echo "性能测试/网页排名"
+spark-shell --master yarn --executor-memory 70g --executor-cores 23 --num-executors 2
+# 输入 :load graph_pagerank.scala
 
-
+# clush -w phoenix0[0-1] "sha1sum /mnt/pmem0/twitter-2010_*.2
 
 
 mpirun --bind-to socket -npersocket 1 --hostfile hostfile.txt -- ./stream_sum __random__ output.txt

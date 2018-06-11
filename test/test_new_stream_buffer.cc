@@ -45,6 +45,7 @@ struct WorkerRequest
 {
   void* data;
   uint64_t size;
+  int numa_node_id;
 };
 
 template <typename T>
@@ -128,11 +129,14 @@ struct VertexUpdater
   MmapMemoryPool* mmap_pool = NULL;
   double* next_val = NULL;
 
+  int numa_bind; // -1 if not bind
+  int numa_node_id; // the numa node id of this updater
   int num_workers;
   int num_producers;
+  int num_numa_nodes;
   int num_buffers;
 
-  ConcurrentWRQueue  responds;
+  ConcurrentWRQueue* responds; // [num_numa_nodes]
   ConcurrentWRQueue* workers_requests; // [num_workers]
 
   bool started = false;
@@ -142,9 +146,15 @@ struct VertexUpdater
   std::condition_variable cond_num_worker_done;
   volatile int num_worker_done = 0;
 
-  /*! \brief Pass driver to create in nvdimm pool
+  /*! \brief Create VertexUpdater with specified num_workers
+   *
    */
-  VertexUpdater(int num_workers, int num_producers, bool enable_nvdimm=false) : num_workers(num_workers), num_producers(num_producers) {
+  VertexUpdater(int num_workers, int num_producers, ConcurrentWRQueue* responds, bool enable_nvdimm=false, int numa_bind=-1) : numa_bind(numa_bind), num_workers(num_workers), num_producers(num_producers), numa_bind(numa_bind), responds(responds) {
+    if (numa_bind < 0) {
+      numa_node_id = 0;
+    } else {
+      numa_node_id = numa_bind;
+    }
     num_buffers = (num_workers + num_producers) * NUM_BUCKETS; // num buffers in buffer pool
     workers_requests = new ConcurrentWRQueue[num_workers];
     workers.resize(num_workers);
@@ -152,15 +162,20 @@ struct VertexUpdater
       Configuration env_config;
       mmap_pool = new MmapMemoryPool(env_config.nvm_off_cache_pool_dir + "/temp.file", num_buffers * sizeof(BufferFragment));
     }
-    for(int i=0; i<num_buffers; i++) {
+    for (int i=0; i<num_buffers; i++) {
       void* data = NULL;
       if (enable_nvdimm) {
         data = mmap_pool->alloc<char>(sizeof(BufferFragment), 4096);
       } else {
-        data = memalign(4096, sizeof(BufferFragment));
+        if (numa_bind == -1) {
+          data = memalign(4096, sizeof(BufferFragment));
+          assert(data);
+        } else {
+          data = numa_alloc_onnode(sizeof(BufferFragment), numa_bind);
+        }
       }
       uint64_t size = 0;
-      responds.push({(UpdateRequest*)data, size});
+      responds[numa_node_id].push({(UpdateRequest*)data, size});
     }
     printf("Total memory consumption for buffers: %.2lf GB\n", 1e-9 * num_buffers * sizeof(BufferFragment));
   }
@@ -185,16 +200,16 @@ struct VertexUpdater
    *  This will fetch a BufferFragment from the pool. Blocked if not enough BufferFragment. (TODO we should reduce this
    *  situation)
    */
-  void* fetch_one() {
-    return responds.pull().data;
-  }
+  // void* fetch_one() {
+  //   return responds.pull().data;
+  // }
 
   /*! \brief Give back one buffer to buffer pool
    *
    *  Inverse to fetch_one
    */
-  void restitution(void* ptr) {
-    responds.push({ptr, 0LL});
+  void restitution(int numa_node_id, void* ptr) {
+    responds[numa_node_id].push({ptr, 0LL, numa_node_id});
   }
 
   void submit(int partition_id, WorkerRequest wr) {
@@ -218,10 +233,10 @@ struct VertexUpdater
     for(int i=0; i<num_workers; i++) {
       workers[i].join();
     }
-    if (responds.size() != num_buffers) {
-      printf("Unexpected buffer size: expected %d   current %zu\n", num_buffers, responds.size());
-      assert(false);
-    }
+    // if (responds.size() != num_buffers) {
+    //   printf("Unexpected buffer size: expected %d   current %zu\n", num_buffers, responds.size());
+    //   assert(false);
+    // }
   }
 
   void _worker(int worker_id) {
@@ -246,7 +261,7 @@ struct VertexUpdater
         }
         active_duration += currentTimeUs();
         req.size = 0;
-        responds.push(req);
+        responds[req.numa_node_id].push(req);
       }
       printf("%lf\n", temp);
     } catch (ConcurrentWRQueue::closed_error ex) {
@@ -403,8 +418,8 @@ int main(int argc, char* argv[]) {
   }
 
   LINES;
-  double* src = (double*) malloc_pinned(num_nodes * sizeof(double));
-  double* next_val = (double*) malloc_pinned(num_nodes * sizeof(double));
+  double* src = (double*) memalign(4096, num_nodes * sizeof(double));
+  double* next_val = (double*) memalign(4096, num_nodes * sizeof(double));
   LINES;
 
   for (size_t i=0; i<num_nodes; i++) {
@@ -485,7 +500,7 @@ int main(int argc, char* argv[]) {
               // where to write back
               size_t write_back_pos = curr_bytes - COMBINE_BUFFER_SIZE;
               // first write back into memory buffer
-              Memcpy<UpdateRequest>::StreamingStoreUnrolled128Byte(&sendbuf[vid_part][write_back_pos], (UpdateRequest*) &combinebuffer[vid_part*COMBINE_BUFFER_SIZE] , COMBINE_BUFFER_SIZE/sizeof(UpdateRequest));
+              Memcpy<UpdateRequest>::StreamingStoreUnrolledB(&sendbuf[vid_part][write_back_pos], (UpdateRequest*) &combinebuffer[vid_part*COMBINE_BUFFER_SIZE] , COMBINE_BUFFER_SIZE/sizeof(UpdateRequest));
               // then send out if required
               if (UNLIKELY(curr_bytes == MPI_SEND_BUFFER_SIZE)) {
                 // Submit sendbuf[vid_part] of size curr_bytes, and fetch a new buffer
